@@ -1,0 +1,7 @@
+crawl4ai==0.9.3
+scrapling[fetchers]==0.4.9
+html2text==2025.4.15
+mcp==1.27.2
+pydantic==2.13.4
+lxml==6.1.1
+cssselect==1.4.0
