@@ -21,6 +21,12 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.hits = []
         self.connections = set()
+        self.auth_dir = Path(tempfile.mkdtemp(prefix="scrapling-auth-"))
+        (self.auth_dir / "bilibili.state.json").write_text(json.dumps({
+            "cookies": [{"name": "session", "value": "ok", "domain": "bilibili.com",
+                         "path": "/", "secure": False}],
+            "origins": [],
+        }), encoding="utf-8")
         handle, cookie_name = tempfile.mkstemp(prefix="scrapling-browser-cookies-", suffix=".json")
         os.close(handle)
         self.cookie_file = Path(cookie_name)
@@ -83,7 +89,7 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
 
         class FixtureProxy(EgressProxy):
             async def _connect(self, host, target_port):
-                if host == "fixture.test" and target_port == port:
+                if host in {"fixture.test", "bilibili.com"} and target_port == port:
                     return await asyncio.open_connection("127.0.0.1", port)
                 return await super()._connect(host, target_port)
 
@@ -92,7 +98,7 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
         self.proxy_patch.start()
         self.validation_patch.start()
         self.engine = ScraplingEngine(allowed_ports=(80, 443, port), min_interval=0,
-                                      cookie_file=self.cookie_file)
+                                      cookie_file=self.cookie_file, auth_dir=self.auth_dir)
 
     async def asyncTearDown(self):
         self.proxy_patch.stop()
@@ -100,6 +106,9 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
         self.server.close()
         await self.server.wait_closed()
         self.cookie_file.unlink(missing_ok=True)
+        for path in self.auth_dir.glob("*"):
+            path.unlink(missing_ok=True)
+        self.auth_dir.rmdir()
         for writer in list(self.connections):
             writer.close()
             await writer.wait_closed()
@@ -132,6 +141,16 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
                 result = await self.engine.scrape(
                     f"http://fixture.test:{self.port}/private", mode, 25, 1000,
                     cookie_profile="fixture")
+                self.assertTrue(result.success, result.to_dict())
+                self.assertIn("Authenticated content", result.markdown)
+
+    async def test_both_engines_use_interactive_auth_profile_state(self):
+        for mode in ("fast", "stealth"):
+            with self.subTest(mode=mode):
+                self.hits.clear()
+                result = await self.engine.scrape(
+                    f"http://bilibili.com:{self.port}/private", mode, 25, 1000,
+                    auth_profile="bilibili")
                 self.assertTrue(result.success, result.to_dict())
                 self.assertIn("Authenticated content", result.markdown)
 

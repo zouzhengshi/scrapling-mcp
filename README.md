@@ -1,7 +1,7 @@
 # Scrapling MCP
 
 面向 AI Agent 的安全通用网页抓取 MCP 服务，基于 Crawl4AI 和 Scrapling，
-通过 **stdio MCP** 提供单页和批量抓取，也可以直接从 Python 异步调用。
+通过 **stdio MCP** 提供单页、批量抓取和本地交互式登录，也可以直接从 Python 异步调用。
 
 ## 项目是什么
 
@@ -38,6 +38,7 @@ Scrapling MCP 将这些能力统一封装为 MCP 工具，并提供公网 URL �
 | --- | --- |
 | MCP 接入 | 通过 stdio 接入支持 MCP 的 AI Agent |
 | 双引擎抓取 | Crawl4AI 快速模式 + Scrapling 隐身模式 |
+| 交互式登录 | 预设常用网站，打开可见浏览器完成正常登录并保存本机状态 |
 | 自动回退 | `auto` 模式在可重试失败时切换备用引擎 |
 | 单页抓取 | 获取标题、状态码、最终 URL 和 Markdown 正文 |
 | 批量抓取 | 一次最多抓取 10 个 URL，并保持输入顺序 |
@@ -57,7 +58,7 @@ Scrapling MCP 将这些能力统一封装为 MCP 工具，并提供公网 URL �
 - 为其他 Agent 提供统一的网页读取工具。
 - 需要浏览器渲染但又不希望每个业务重复维护浏览器代码的项目。
 
-当前项目定位为“公开网页读取服务”，也支持通过本地 Cookie profile 读取你有权限访问的登录页面，
+当前项目定位为“公开网页读取服务”，也支持通过本地交互式登录或 Cookie profile 读取你有权限访问的登录页面，
 但不是完整的搜索引擎或整站爬虫。暂不支持任意用户脚本、文件下载、PDF 解析、POST 页面和递归整站爬取。
 
 ## 安装和启动
@@ -94,7 +95,8 @@ Linux 首次安装浏览器可能还需要 `python -m playwright install --with-
         "SCRAPLING_MAX_CONCURRENCY": "3",
         "SCRAPLING_MAX_QUEUE": "24",
         "SCRAPLING_MIN_INTERVAL": "1",
-        "SCRAPLING_COOKIE_FILE": "D:\\Scrapling\\cookie_profiles.json"
+        "SCRAPLING_COOKIE_FILE": "D:\\Scrapling\\cookie_profiles.json",
+        "SCRAPLING_AUTH_DIR": "D:\\Scrapling\\auth_profiles"
       }
     }
   }
@@ -104,7 +106,40 @@ Linux 首次安装浏览器可能还需要 `python -m playwright install --with-
 各客户端配置文件位置可能不同，但启动命令相同。服务由客户端启动，修改代码后重启连接。
 无需设置工作目录。当前不提供 HTTP 监听、远程认证或多租户服务。
 
-### 登录网站与 Cookie profile
+### 交互式登录（推荐）
+
+不想手动复制 Cookie 时，直接调用 `login` 工具。当前预设网站为：
+`bilibili`、`github`、`zhihu`、`weibo`、`xiaohongshu`。
+
+调用：
+
+```json
+{
+  "site": "bilibili",
+  "timeout": 300
+}
+```
+
+服务会打开可见 Chromium 窗口。请在窗口中像正常访问网站一样完成密码、扫码、验证码和二次验证，
+登录完成后关闭浏览器窗口；服务会把登录状态保存到本机认证目录。后续抓取只传 profile 名称：
+
+```json
+{
+  "url": "https://www.bilibili.com/",
+  "mode": "stealth",
+  "auth_profile": "bilibili",
+  "timeout": 30,
+  "max_chars": 5000
+}
+```
+
+认证状态包含浏览器 Cookie 和站点存储数据，但不会进入 MCP 参数、工具返回值或 Git 仓库。
+`SCRAPLING_AUTH_DIR` 可指定保存目录；不设置时使用当前操作系统的用户数据目录。
+重新登录同一网站会覆盖该网站的本机状态。登录状态过期后，再调用一次 `login` 即可更新。
+
+登录工具会话只用于用户明确授权的账号和网站，不会代替用户输入密码或验证码，也不承诺绕过网站风控。
+
+### 手动 Cookie profile
 
 如需读取你有权限访问的登录页面，先在本机创建 Cookie 配置文件，推荐从
 `cookie_profiles.example.json` 复制一份为 `cookie_profiles.json`，再填入浏览器导出的 Cookie。
@@ -167,6 +202,7 @@ Linux 首次安装浏览器可能还需要 `python -m playwright install --with-
 | main_content | true | 优先提取 main/article，过滤常见导航内容 |
 | include_links | true | 保留 Markdown 链接，并解析相对链接 |
 | cookie_profile | null | 使用服务端本地 Cookie 配置名称，不传递 Cookie 原文 |
+| auth_profile | null | 使用 login 工具保存的本机登录状态名称 |
 
 CSS 参数使用标准 CSS 选择器，不接受 JavaScript、XPath 或 Playwright 专用选择器。
 所有参数在引擎层校验；MCP 层同时提供参数范围和结果 JSON Schema。
@@ -206,7 +242,7 @@ CSS 参数使用标准 CSS 选择器，不接受 JavaScript、XPath 或 Playwrig
 
 ### scrape_batch
 
-参数为 `urls`、`mode`、`timeout`、`max_chars`、`cookie_profile`。
+参数为 `urls`、`mode`、`timeout`、`max_chars`、`cookie_profile`、`auth_profile`。
 最多10个URL，每页正文最多10000字符；同样共享服务端并发、队列和域名限速。
 每个URL的超时包含排队，所以批量较大、预算较小时，部分URL可能在队列中超时。
 返回结果顺序与输入一致，包含 `total/succeeded/failed/results`。
@@ -229,6 +265,7 @@ CSS 参数使用标准 CSS 选择器，不接受 JavaScript、XPath 或 Playwrig
 | CONTENT_TOO_LARGE | 传输或HTML超出限制 |
 | DEPENDENCY_ERROR | 引擎或浏览器缺失；运行 --check |
 | COOKIE_ERROR | Cookie profile 未配置、格式错误或目标域名不匹配 |
+| AUTH_ERROR | 交互式登录状态未配置、已损坏、已过期或目标域名不匹配 |
 | ENGINE_ERROR | 浏览器或工作进程失败 |
 
 `retryable` 只是提示，不会触发无限重试。
@@ -250,7 +287,7 @@ async def main():
 asyncio.run(main())
 ```
 
-现有 `ScraplingEngine` / `ScrapeResult.engine_used` 接口保留。
+现有 `ScraplingEngine` / `ScrapeResult.engine_used` 接口保留；Python 调用可传 `auth_profile="bilibili"`。
 MCP函数返回 MCP 结果对象，Python 调用方应使用 `src.scrape`。
 
 ## 安全和资源边界
@@ -265,7 +302,8 @@ MCP函数返回 MCP 结果对象，Python 调用方应使用 `src.scrape`。
 - 代理不解密HTTPS，不关闭证书验证；关闭浏览器的本机代理绕过、QUIC及非代理WebRTC UDP。
   浏览器请求额外限制为GET/HEAD，禁用WebSocket；部分依赖POST加载正文的网站可能不可用。
 - 每次尝试都有独立进程和临时浏览器资料目录，无共享登录状态；若指定 Cookie profile，
-  只在本次任务中注入匹配目标域名的 Cookie。Windows 使用 Job Object，POSIX 使用进程组；
+  只在本次任务中注入匹配目标域名的 Cookie；若指定 auth profile，只加载匹配目标域名的本机登录状态。
+  Windows 使用 Job Object，POSIX 使用进程组；
   超时或取消会终止工作进程树，并清理临时文件后释放并发槽位。
   相比复用浏览器，这会增加启动耗时。
 - 默认3并发、24等待；并发可设1–8、等待可设0–128。同域名导航默认至少间隔1秒，
@@ -279,7 +317,7 @@ MCP函数返回 MCP 结果对象，Python 调用方应使用 `src.scrape`。
 这些是应用层防护，不是操作系统网络沙箱。公开部署或处理不可信用户时，
 仍应在容器/防火墙层限制出站网络和资源；目前没有验证浏览器漏洞、
 自建会话逃逸进程组、非标准网络栈等对抗场景。
-支持本地命名 Cookie profile；尚不支持任意用户脚本、文件下载、PDF解析、递归整站爬取和上游代理。
+支持预设网站的本地交互式登录和命名 Cookie profile；尚不支持任意用户脚本、文件下载、PDF解析、递归整站爬取和上游代理。
 没有自动处理robots.txt；使用者需遵守目标网站的访问规则。
 
 ## 验证

@@ -24,6 +24,15 @@ class McpTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(reply.structuredContent["content_is_untrusted"])
         self.assertEqual(engine.scrape.await_args.kwargs["cookie_profile"], "demo")
 
+    async def test_auth_profile_is_forwarded(self):
+        result = ScrapeResult("https://github.com/", "crawl4ai", "# GitHub", True)
+        engine = unittest.mock.Mock()
+        engine.scrape = AsyncMock(return_value=result)
+        with patch("src.mcp_server._获取引擎", return_value=engine):
+            reply = await scrape("https://github.com/", auth_profile="github")
+        self.assertFalse(reply.isError)
+        self.assertEqual(engine.scrape.await_args.kwargs["auth_profile"], "github")
+
     async def test_batch_preserves_order_and_partial_failure(self):
         engine = unittest.mock.Mock()
         engine.scrape = AsyncMock(side_effect=[
@@ -46,9 +55,12 @@ class McpTests(unittest.IsolatedAsyncioTestCase):
                 async with ClientSession(reader, writer) as session:
                     await session.initialize()
                     tools = {t.name: t for t in (await session.list_tools()).tools}
-                    self.assertEqual(set(tools), {"scrape", "scrape_batch"})
+                    self.assertEqual(set(tools), {"login", "scrape", "scrape_batch"})
                     self.assertIn("error_code", tools["scrape"].outputSchema["properties"])
                     self.assertIn("cookie_profile", tools["scrape"].inputSchema["properties"])
+                    self.assertIn("auth_profile", tools["scrape"].inputSchema["properties"])
+                    self.assertEqual(tools["login"].inputSchema["properties"]["site"]["enum"],
+                                     ["bilibili", "github", "zhihu", "weibo", "xiaohongshu"])
                     denied, ping = await asyncio.gather(
                         session.call_tool("scrape", {"url": "http://127.0.0.1/"}), session.send_ping())
                     self.assertTrue(denied.isError)

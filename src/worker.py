@@ -5,6 +5,7 @@ import asyncio
 from dataclasses import asdict
 import json
 import os
+from pathlib import Path
 import sys
 
 from src.content import MAX_HTML_CHARS, make_result
@@ -42,12 +43,44 @@ async def setup_page(page, context=None, cookies=None, **kwargs):
     return page
 
 
+def _write_local_storage_init_script(work_dir, auth_state):
+    values = {}
+    for origin in (auth_state or {}).get("origins", []):
+        if not isinstance(origin, dict) or not isinstance(origin.get("origin"), str):
+            continue
+        items = origin.get("localStorage", [])
+        if not isinstance(items, list):
+            continue
+        values[origin["origin"]] = {
+            item["name"]: item["value"] for item in items
+            if isinstance(item, dict) and isinstance(item.get("name"), str)
+            and isinstance(item.get("value"), str)
+        }
+    if not values:
+        return None
+    script = """(() => {
+  const storage = %s;
+  const values = storage[window.location.origin];
+  if (!values) return;
+  try {
+    for (const [name, value] of Object.entries(values)) {
+      window.localStorage.setItem(name, value);
+    }
+  } catch (_) {}
+})();
+""" % json.dumps(values, ensure_ascii=True, separators=(",", ":"))
+    path = Path(work_dir) / "auth-local-storage.js"
+    path.write_text(script, encoding="utf-8")
+    return str(path)
+
+
 async def crawl(payload):
     from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 
     config = BrowserConfig(headless=True, verbose=False, proxy_config=payload["proxy"],
                            extra_args=BROWSER_FLAGS, ignore_https_errors=False, accept_downloads=False,
-                           cookies=payload.get("cookies", []))
+                           cookies=payload.get("cookies", []),
+                           storage_state=payload.get("auth_state") or None)
     options = payload["options"]
     run = CrawlerRunConfig(
         cache_mode=CacheMode.DISABLED, page_timeout=max(1, int(payload["timeout"] * 1000)),
@@ -72,14 +105,18 @@ async def stealth(payload):
     from scrapling.fetchers import AsyncStealthySession
 
     options = payload["options"]
+    auth_state = payload.get("auth_state") or {}
+    cookies = payload.get("cookies", []) or auth_state.get("cookies", [])
+    init_script = _write_local_storage_init_script(payload["work_dir"], auth_state)
     async with AsyncStealthySession(
         headless=True, proxy=payload["proxy"], extra_flags=BROWSER_FLAGS,
         user_data_dir=os.path.join(payload["work_dir"], "profile"),
+        init_script=init_script,
         block_webrtc=True, retries=1, google_search=False,
         additional_args={"service_workers": "block", "accept_downloads": False, "ignore_https_errors": False},
     ) as session:
         # Security setup occurs outside Scrapling's exception-swallowing page_setup hook.
-        await setup_page(None, context=session.context, cookies=payload.get("cookies", []))
+        await setup_page(None, context=session.context, cookies=cookies)
         response = await session.fetch(
             payload["url"], timeout=max(1, int(payload["timeout"] * 1000)),
             # Challenge pages are classified by the shared extractor. Automatic

@@ -21,7 +21,7 @@ if __name__ == "__main__":
         print(json.dumps(report, ensure_ascii=False, indent=2))
         raise SystemExit(0 if report["ready"] else 1)
     if "--version" in sys.argv:
-        print("Scrapling MCP 1.0.0")
+        print("Scrapling MCP 1.1.0")
         raise SystemExit(0)
     from src.mcp_server import main
     main()
