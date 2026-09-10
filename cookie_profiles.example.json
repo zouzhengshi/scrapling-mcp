@@ -1,0 +1,18 @@
+{
+  "profiles": {
+    "example-account": {
+      "allowed_domains": ["example.com"],
+      "cookies": [
+        {
+          "name": "session",
+          "value": "REPLACE_ON_LOCAL_MACHINE",
+          "domain": ".example.com",
+          "path": "/",
+          "secure": true,
+          "httpOnly": true,
+          "sameSite": "Lax"
+        }
+      ]
+    }
+  }
+}

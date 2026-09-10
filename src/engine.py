@@ -5,11 +5,13 @@ import asyncio
 from collections import OrderedDict
 import logging
 import math
+import os
 import time
 from urllib.parse import urlsplit
 import weakref
 
 from src.content import _truncate_markdown
+from src.cookies import CookieProfileError, load_cookies
 from src.egress import EgressProxy
 from src.models import ScrapeResult, failure
 from src.processes import run_worker
@@ -23,7 +25,7 @@ class ScraplingEngine:
     MAX_OUTPUT_CHARS = 200000
 
     def __init__(self, max_concurrency=3, default_max_chars=50000, *,
-                 max_queue=24, min_interval=1.0, allowed_ports=DEFAULT_PORTS):
+                 max_queue=24, min_interval=1.0, allowed_ports=DEFAULT_PORTS, cookie_file=None):
         for name, value, low, high in (
             ("max_concurrency", max_concurrency, 1, 8),
             ("default_max_chars", default_max_chars, 1, self.MAX_OUTPUT_CHARS),
@@ -42,8 +44,10 @@ class ScraplingEngine:
         self._min_interval = min_interval
         self._host_next = OrderedDict()
         self.allowed_ports = tuple(allowed_ports)
+        self.cookie_file = cookie_file or os.environ.get("SCRAPLING_COOKIE_FILE")
 
-    def _validate_options(self, mode, timeout, max_chars, css_selector, wait_for, main_content, include_links):
+    def _validate_options(self, mode, timeout, max_chars, css_selector, wait_for, main_content, include_links,
+                          cookie_profile):
         if mode not in ("auto", "fast", "stealth"):
             raise ValueError("mode 必须是 auto、fast 或 stealth")
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or not 0 < timeout <= self.MAX_TIMEOUT_SECONDS:
@@ -52,6 +56,8 @@ class ScraplingEngine:
             raise ValueError("max_chars 必须是 1–200000 的整数")
         if type(main_content) is not bool or type(include_links) is not bool:
             raise ValueError("main_content 和 include_links 必须是布尔值")
+        if cookie_profile is not None and (not isinstance(cookie_profile, str) or not cookie_profile.strip() or len(cookie_profile) > 64):
+            raise ValueError("cookie_profile 必须是 1–64 字符的配置名称")
         for selector in (css_selector, wait_for):
             if selector is not None:
                 if not isinstance(selector, str) or not selector.strip() or len(selector) > 1000:
@@ -73,7 +79,8 @@ class ScraplingEngine:
             await asyncio.sleep(due - now)
 
     async def scrape(self, url: str, mode="auto", timeout=30.0, max_chars=None, *,
-                     css_selector=None, wait_for=None, main_content=True, include_links=True) -> ScrapeResult:
+                     css_selector=None, wait_for=None, main_content=True, include_links=True,
+                     cookie_profile=None) -> ScrapeResult:
         """One total budget for queue, DNS, host pacing, startup and all attempts.
 
         Process termination/reaping happens before the concurrency slot is released.
@@ -84,9 +91,14 @@ class ScraplingEngine:
         safe_url = url if isinstance(url, str) else ""
         attempts = []
         current_engine = "validation"
+        cookies = []
         try:
-            self._validate_options(mode, timeout, limit, css_selector, wait_for, main_content, include_links)
+            self._validate_options(mode, timeout, limit, css_selector, wait_for, main_content, include_links,
+                                   cookie_profile)
             safe_url = normalize_url(url, self.allowed_ports)
+            cookies = load_cookies(cookie_profile, self.cookie_file, safe_url)
+        except CookieProfileError as exc:
+            return self._finish(failure(safe_url, "validation", "COOKIE_ERROR", str(exc)), start, [], limit=0)
         except ValueError as exc:
             code = "UNSAFE_URL" if isinstance(exc, UnsafeUrlError) else "INVALID_ARGUMENT"
             return self._finish(failure(safe_url, "validation", code, str(exc)), start, [], limit=0)
@@ -113,7 +125,7 @@ class ScraplingEngine:
                         budget = remaining / 2 if mode == "auto" and index == 0 else remaining
                         try:
                             async with asyncio.timeout(budget):
-                                result = await self._attempt(safe_url, current_engine, budget, options)
+                                result = await self._attempt(safe_url, current_engine, budget, options, cookies)
                         except TimeoutError:
                             result = failure(safe_url, current_engine, "TIMEOUT", "引擎抓取预算已耗尽", True)
                         attempts.append({"engine": current_engine, "success": result.success,
@@ -142,11 +154,12 @@ class ScraplingEngine:
             self._pending -= 1
         return self._finish(result, start, attempts, limit)
 
-    async def _attempt(self, url, engine, timeout, options):
+    async def _attempt(self, url, engine, timeout, options, cookies=None):
         async with EgressProxy(self.allowed_ports) as proxy:
             try:
                 raw = await run_worker(dict(url=url, engine=engine, timeout=timeout,
                                             options=options, proxy=proxy.browser_proxy,
+                                            cookies=cookies or [],
                                             allowed_ports=self.allowed_ports))
                 result = ScrapeResult(**raw)
             except (OSError, ValueError, RuntimeError, TypeError):

@@ -20,8 +20,11 @@ BROWSER_FLAGS = [
 ]
 
 
-async def setup_page(page, context=None, **kwargs):
+async def setup_page(page, context=None, cookies=None, **kwargs):
     context = context or page.context
+
+    if cookies:
+        await context.add_cookies(cookies)
 
     async def route_request(route):
         # The proxy is the SSRF boundary; this is additional protocol/method filtering.
@@ -43,7 +46,8 @@ async def crawl(payload):
     from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 
     config = BrowserConfig(headless=True, verbose=False, proxy_config=payload["proxy"],
-                           extra_args=BROWSER_FLAGS, ignore_https_errors=False, accept_downloads=False)
+                           extra_args=BROWSER_FLAGS, ignore_https_errors=False, accept_downloads=False,
+                           cookies=payload.get("cookies", []))
     options = payload["options"]
     run = CrawlerRunConfig(
         cache_mode=CacheMode.DISABLED, page_timeout=max(1, int(payload["timeout"] * 1000)),
@@ -51,7 +55,9 @@ async def crawl(payload):
         verbose=False, max_retries=0, check_robots_txt=False,
     )
     async with AsyncWebCrawler(config=config, base_directory=payload["work_dir"]) as crawler:
-        crawler.crawler_strategy.set_hook("on_page_context_created", setup_page)
+        async def configure_page(page, context=None, **kwargs):
+            return await setup_page(page, context=context, **kwargs)
+        crawler.crawler_strategy.set_hook("on_page_context_created", configure_page)
         result = await crawler.arun(url=payload["url"], config=run)
         raw = result.html or ""
         if not result.success and not raw:
@@ -73,7 +79,7 @@ async def stealth(payload):
         additional_args={"service_workers": "block", "accept_downloads": False, "ignore_https_errors": False},
     ) as session:
         # Security setup occurs outside Scrapling's exception-swallowing page_setup hook.
-        await setup_page(None, context=session.context)
+        await setup_page(None, context=session.context, cookies=payload.get("cookies", []))
         response = await session.fetch(
             payload["url"], timeout=max(1, int(payload["timeout"] * 1000)),
             # Challenge pages are classified by the shared extractor. Automatic

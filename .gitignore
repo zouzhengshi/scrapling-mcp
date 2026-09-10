@@ -4,3 +4,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .env
+cookie_profiles.json
+cookie_profiles.local.json
+cookies.json
+*.cookies.json

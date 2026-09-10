@@ -57,8 +57,8 @@ Scrapling MCP 将这些能力统一封装为 MCP 工具，并提供公网 URL �
 - 为其他 Agent 提供统一的网页读取工具。
 - 需要浏览器渲染但又不希望每个业务重复维护浏览器代码的项目。
 
-当前项目定位为“公开网页读取服务”，不是完整的搜索引擎或整站爬虫。
-暂不支持登录 Cookie、任意用户脚本、文件下载、PDF 解析、POST 页面和递归整站爬取。
+当前项目定位为“公开网页读取服务”，也支持通过本地 Cookie profile 读取你有权限访问的登录页面，
+但不是完整的搜索引擎或整站爬虫。暂不支持任意用户脚本、文件下载、PDF 解析、POST 页面和递归整站爬取。
 
 ## 安装和启动
 
@@ -93,7 +93,8 @@ Linux 首次安装浏览器可能还需要 `python -m playwright install --with-
         "PYTHONIOENCODING": "utf-8",
         "SCRAPLING_MAX_CONCURRENCY": "3",
         "SCRAPLING_MAX_QUEUE": "24",
-        "SCRAPLING_MIN_INTERVAL": "1"
+        "SCRAPLING_MIN_INTERVAL": "1",
+        "SCRAPLING_COOKIE_FILE": "D:\\Scrapling\\cookie_profiles.json"
       }
     }
   }
@@ -102,6 +103,56 @@ Linux 首次安装浏览器可能还需要 `python -m playwright install --with-
 
 各客户端配置文件位置可能不同，但启动命令相同。服务由客户端启动，修改代码后重启连接。
 无需设置工作目录。当前不提供 HTTP 监听、远程认证或多租户服务。
+
+### 登录网站与 Cookie profile
+
+如需读取你有权限访问的登录页面，先在本机创建 Cookie 配置文件，推荐从
+`cookie_profiles.example.json` 复制一份为 `cookie_profiles.json`，再填入浏览器导出的 Cookie。
+不要把真实 Cookie 文件提交到 Git，也不要通过聊天发送 Cookie 值。
+
+配置文件格式：
+
+```json
+{
+  "profiles": {
+    "example-account": {
+      "allowed_domains": ["example.com"],
+      "cookies": [
+        {
+          "name": "session",
+          "value": "在本机填写真实值",
+          "domain": ".example.com",
+          "path": "/",
+          "secure": true,
+          "httpOnly": true,
+          "sameSite": "Lax"
+        }
+      ]
+    }
+  }
+}
+```
+
+然后在 MCP 客户端的 `env` 中设置：
+
+```json
+"SCRAPLING_COOKIE_FILE": "D:\\Scrapling\\cookie_profiles.json"
+```
+
+调用时只传配置名称，不传 Cookie 原文：
+
+```json
+{
+  "url": "https://example.com/dashboard",
+  "mode": "stealth",
+  "cookie_profile": "example-account",
+  "timeout": 30,
+  "max_chars": 5000
+}
+```
+
+服务只会注入与目标域名匹配的 Cookie，每次抓取使用独立浏览器环境，
+不会把 Cookie 返回给 Agent。Cookie 仅适用于读取型 GET/HEAD 请求；如果网站需要登录表单、POST、验证码或二次认证，可能仍然无法抓取。
 
 ### scrape
 
@@ -115,6 +166,7 @@ Linux 首次安装浏览器可能还需要 `python -m playwright install --with-
 | wait_for | null | 等待 CSS 元素出现，如 #content |
 | main_content | true | 优先提取 main/article，过滤常见导航内容 |
 | include_links | true | 保留 Markdown 链接，并解析相对链接 |
+| cookie_profile | null | 使用服务端本地 Cookie 配置名称，不传递 Cookie 原文 |
 
 CSS 参数使用标准 CSS 选择器，不接受 JavaScript、XPath 或 Playwright 专用选择器。
 所有参数在引擎层校验；MCP 层同时提供参数范围和结果 JSON Schema。
@@ -154,7 +206,7 @@ CSS 参数使用标准 CSS 选择器，不接受 JavaScript、XPath 或 Playwrig
 
 ### scrape_batch
 
-参数为 `urls`、`mode`、`timeout`、`max_chars`。
+参数为 `urls`、`mode`、`timeout`、`max_chars`、`cookie_profile`。
 最多10个URL，每页正文最多10000字符；同样共享服务端并发、队列和域名限速。
 每个URL的超时包含排队，所以批量较大、预算较小时，部分URL可能在队列中超时。
 返回结果顺序与输入一致，包含 `total/succeeded/failed/results`。
@@ -176,6 +228,7 @@ CSS 参数使用标准 CSS 选择器，不接受 JavaScript、XPath 或 Playwrig
 | SELECTOR_NOT_FOUND | 正文选择器无匹配 |
 | CONTENT_TOO_LARGE | 传输或HTML超出限制 |
 | DEPENDENCY_ERROR | 引擎或浏览器缺失；运行 --check |
+| COOKIE_ERROR | Cookie profile 未配置、格式错误或目标域名不匹配 |
 | ENGINE_ERROR | 浏览器或工作进程失败 |
 
 `retryable` 只是提示，不会触发无限重试。
@@ -211,8 +264,9 @@ MCP函数返回 MCP 结果对象，Python 调用方应使用 `src.scrape`。
   允许额外端口；这不会允许内网IP，也不是Agent工具参数。
 - 代理不解密HTTPS，不关闭证书验证；关闭浏览器的本机代理绕过、QUIC及非代理WebRTC UDP。
   浏览器请求额外限制为GET/HEAD，禁用WebSocket；部分依赖POST加载正文的网站可能不可用。
-- 每次尝试都有独立进程和临时浏览器资料目录，无共享登录状态。Windows 使用 Job Object，
-  POSIX 使用进程组；超时或取消会终止工作进程树，并清理临时文件后释放并发槽位。
+- 每次尝试都有独立进程和临时浏览器资料目录，无共享登录状态；若指定 Cookie profile，
+  只在本次任务中注入匹配目标域名的 Cookie。Windows 使用 Job Object，POSIX 使用进程组；
+  超时或取消会终止工作进程树，并清理临时文件后释放并发槽位。
   相比复用浏览器，这会增加启动耗时。
 - 默认3并发、24等待；并发可设1–8、等待可设0–128。同域名导航默认至少间隔1秒，
   `SCRAPLING_MIN_INTERVAL` 可设0–60秒。每次尝试最多20MB代理流量、400万字符HTML、
@@ -225,7 +279,7 @@ MCP函数返回 MCP 结果对象，Python 调用方应使用 `src.scrape`。
 这些是应用层防护，不是操作系统网络沙箱。公开部署或处理不可信用户时，
 仍应在容器/防火墙层限制出站网络和资源；目前没有验证浏览器漏洞、
 自建会话逃逸进程组、非标准网络栈等对抗场景。
-尚不支持登录Cookie、任意用户脚本、文件下载、PDF解析、递归整站爬取和上游代理。
+支持本地命名 Cookie profile；尚不支持任意用户脚本、文件下载、PDF解析、递归整站爬取和上游代理。
 没有自动处理robots.txt；使用者需遵守目标网站的访问规则。
 
 ## 验证

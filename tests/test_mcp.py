@@ -18,10 +18,11 @@ class McpTests(unittest.IsolatedAsyncioTestCase):
         engine = unittest.mock.Mock()
         engine.scrape = AsyncMock(return_value=result)
         with patch("src.mcp_server._获取引擎", return_value=engine):
-            reply = await scrape("https://example.com/")
+            reply = await scrape("https://example.com/", cookie_profile="demo")
         self.assertEqual(json.loads(reply.content[0].text), reply.structuredContent)
         self.assertFalse(reply.isError)
         self.assertTrue(reply.structuredContent["content_is_untrusted"])
+        self.assertEqual(engine.scrape.await_args.kwargs["cookie_profile"], "demo")
 
     async def test_batch_preserves_order_and_partial_failure(self):
         engine = unittest.mock.Mock()
@@ -47,6 +48,7 @@ class McpTests(unittest.IsolatedAsyncioTestCase):
                     tools = {t.name: t for t in (await session.list_tools()).tools}
                     self.assertEqual(set(tools), {"scrape", "scrape_batch"})
                     self.assertIn("error_code", tools["scrape"].outputSchema["properties"])
+                    self.assertIn("cookie_profile", tools["scrape"].inputSchema["properties"])
                     denied, ping = await asyncio.gather(
                         session.call_tool("scrape", {"url": "http://127.0.0.1/"}), session.send_ping())
                     self.assertTrue(denied.isError)
