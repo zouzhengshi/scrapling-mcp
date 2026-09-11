@@ -32,5 +32,38 @@ jobs:
           python -m pip install -e .
           python -m playwright install chromium
           python -m patchright install chromium
-      - name: Run tests
-        run: python -X faulthandler -m unittest discover -s tests -v
+      # Keep each test module visible as its own check. This makes a
+      # cross-platform failure diagnosable without exposing secrets or logs.
+      - name: Test audit logging
+        if: always()
+        run: python -X faulthandler -m unittest discover -s tests -p "test_audit_log.py" -v
+      - name: Test authentication
+        if: always()
+        run: python -X faulthandler -m unittest discover -s tests -p "test_auth.py" -v
+      - name: Test CLI
+        if: always()
+        run: python -X faulthandler -m unittest discover -s tests -p "test_cli.py" -v
+      - name: Test configuration
+        if: always()
+        run: python -X faulthandler -m unittest discover -s tests -p "test_config.py" -v
+      - name: Test content extraction
+        if: always()
+        run: python -X faulthandler -m unittest discover -s tests -p "test_content.py" -v
+      - name: Test cookies
+        if: always()
+        run: python -X faulthandler -m unittest discover -s tests -p "test_cookies.py" -v
+      - name: Test egress proxy
+        if: always()
+        run: python -X faulthandler -m unittest discover -s tests -p "test_egress.py" -v
+      - name: Test engine
+        if: always()
+        run: python -X faulthandler -m unittest discover -s tests -p "test_engine.py" -v
+      - name: Test MCP stdio protocol
+        if: always()
+        run: python -X faulthandler -m unittest discover -s tests -p "test_mcp.py" -v
+      - name: Test process cleanup
+        if: always()
+        run: python -X faulthandler -m unittest discover -s tests -p "test_processes.py" -v
+      - name: Test management terminal
+        if: always()
+        run: python -X faulthandler -m unittest discover -s tests -p "test_terminal.py" -v
