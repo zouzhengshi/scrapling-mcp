@@ -75,4 +75,12 @@ def make_result(url, engine, raw_html, status, final_url, options, headers=None)
     result.markdown, result.truncated, original = _truncate_markdown(markdown, options["max_chars"])
     result.success = True
     result.metadata = {"original_markdown_length": original, "truncated": result.truncated}
+    result.summary = {
+        "title": title,
+        "status_code": status,
+        "content_chars": original,
+        "link_count": len(document.xpath("//a[@href]")),
+        "image_count": len(document.xpath("//img")),
+        "paragraph_count": len(document.xpath("//p")),
+    }
     return result

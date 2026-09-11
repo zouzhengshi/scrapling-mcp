@@ -8,6 +8,15 @@ cookie_profiles.json
 cookie_profiles.local.json
 cookies.json
 *.cookies.json
+logs/
+*.log
+*.jsonl
+*.egg-info/
 auth_profiles/
 auth-profiles/
 *.state.json
+
+# Local browser profiles may contain cookies, tokens and browsing history.
+youtube_profile*/
+browser_profile*/
+scrapling-browser-profile*/

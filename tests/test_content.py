@@ -21,6 +21,8 @@ class ContentTests(unittest.TestCase):
         self.assertIn("https://example.com/docs", result.markdown)
         self.assertNotIn("alert", result.markdown)
         self.assertEqual(result.title, "Fixture")
+        self.assertEqual(result.summary["link_count"], 1)
+        self.assertEqual(result.summary["paragraph_count"], 1)
 
     def test_selector_and_http_errors_are_machine_readable(self):
         html = "<html><title>Not found</title><body>missing</body></html>"

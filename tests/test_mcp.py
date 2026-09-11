@@ -22,6 +22,8 @@ class McpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(reply.content[0].text), reply.structuredContent)
         self.assertFalse(reply.isError)
         self.assertTrue(reply.structuredContent["content_is_untrusted"])
+        self.assertEqual(reply.structuredContent["schema_version"], "1.1")
+        self.assertIn("summary", reply.structuredContent)
         self.assertEqual(engine.scrape.await_args.kwargs["cookie_profile"], "demo")
 
     async def test_auth_profile_is_forwarded(self):
@@ -33,6 +35,16 @@ class McpTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(reply.isError)
         self.assertEqual(engine.scrape.await_args.kwargs["auth_profile"], "github")
 
+    async def test_disabled_tool_returns_structured_marker_without_running_engine(self):
+        engine = unittest.mock.Mock()
+        engine.scrape = AsyncMock()
+        with patch("src.mcp_server.is_tool_enabled", return_value=False), \
+                patch("src.mcp_server._获取引擎", return_value=engine):
+            reply = await scrape("https://example.com/")
+        self.assertTrue(reply.isError)
+        self.assertEqual(reply.structuredContent["error_code"], "TOOL_DISABLED")
+        engine.scrape.assert_not_awaited()
+
     async def test_batch_preserves_order_and_partial_failure(self):
         engine = unittest.mock.Mock()
         engine.scrape = AsyncMock(side_effect=[
@@ -43,6 +55,7 @@ class McpTests(unittest.IsolatedAsyncioTestCase):
             reply = await scrape_batch(["https://one.test/", "https://two.test/"])
         self.assertFalse(reply.isError)
         self.assertEqual(reply.structuredContent["failed"], 1)
+        self.assertEqual(reply.structuredContent["message"], "批量抓取完成：成功 1 个，失败 1 个")
         self.assertEqual([r["url"] for r in reply.structuredContent["results"]],
                          ["https://one.test/", "https://two.test/"])
 
@@ -53,17 +66,22 @@ class McpTests(unittest.IsolatedAsyncioTestCase):
         async with asyncio.timeout(15):
             async with stdio_client(parameters) as (reader, writer):
                 async with ClientSession(reader, writer) as session:
-                    await session.initialize()
+                    initialize_result = await session.initialize()
+                    self.assertIn("scrape", initialize_result.instructions)
+                    self.assertIn("login_custom", initialize_result.instructions)
+                    self.assertIn("Cookie 原文", initialize_result.instructions)
                     tools = {t.name: t for t in (await session.list_tools()).tools}
                     self.assertEqual(set(tools), {
                         "login", "login_status", "login_custom", "login_custom_status",
                         "scrape", "scrape_batch",
                     })
                     self.assertIn("error_code", tools["scrape"].outputSchema["properties"])
+                    self.assertIn("summary", tools["scrape"].outputSchema["properties"])
+                    self.assertIn("message", tools["scrape_batch"].outputSchema["properties"])
                     self.assertIn("cookie_profile", tools["scrape"].inputSchema["properties"])
                     self.assertIn("auth_profile", tools["scrape"].inputSchema["properties"])
                     self.assertEqual(tools["login"].inputSchema["properties"]["site"]["enum"],
-                                     ["bilibili", "github", "zhihu", "weibo", "xiaohongshu"])
+                                     ["bilibili", "youtube", "github", "zhihu", "weibo", "xiaohongshu"])
                     self.assertIn("finalize", tools["login_status"].inputSchema["properties"])
                     self.assertIn("url", tools["login_custom"].inputSchema["properties"])
                     self.assertIn("allowed_domains", tools["login_custom"].inputSchema["properties"])

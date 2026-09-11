@@ -19,11 +19,12 @@ class ScrapeResult:
     error_code: str | None = None
     retryable: bool = False
     attempts: list[dict[str, Any]] = field(default_factory=list)
+    summary: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
         result["engine"] = result.pop("engine_used")
-        result["schema_version"] = "1.0"
+        result["schema_version"] = "1.1"
         result["content_is_untrusted"] = True
         result["elapsed_ms"] = round(self.elapsed_ms, 2)
         return result

@@ -52,6 +52,32 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.error_code, "BLOCKED")
 
+    async def test_retryable_engine_failure_is_retried_within_budget(self):
+        engine = ScraplingEngine(max_concurrency=1, max_queue=0, min_interval=0)
+        first = self._result("crawl4ai", False, "ENGINE_ERROR")
+        first.retryable = True
+        attempt = AsyncMock(side_effect=[first, self._result("crawl4ai", True, markdown="ok")])
+        with patch("src.engine.validate_url", new=AsyncMock(return_value="https://example.com/")), \
+             patch.object(engine, "_attempt", attempt):
+            result = await engine.scrape("https://example.com", "fast", 3)
+        self.assertTrue(result.success)
+        self.assertEqual(attempt.await_count, 2)
+        self.assertEqual([item["retry"] for item in result.attempts], [0, 1])
+
+    async def test_public_success_is_cached_but_authenticated_content_is_not(self):
+        engine = ScraplingEngine(max_concurrency=1, max_queue=0, min_interval=0, cache_ttl=30)
+        attempt = AsyncMock(return_value=self._result("crawl4ai", True, markdown="cached"))
+        with patch("src.engine.validate_url", new=AsyncMock(return_value="https://example.com/")), \
+             patch("src.engine.load_auth_state", return_value=None), \
+             patch.object(engine, "_attempt", attempt):
+            first = await engine.scrape("https://example.com", "fast", 3)
+            second = await engine.scrape("https://example.com", "fast", 3)
+            private = await engine.scrape("https://example.com", "fast", 3, auth_profile="github")
+        self.assertFalse(first.metadata.get("cache_hit", False))
+        self.assertTrue(second.metadata["cache_hit"])
+        self.assertEqual(attempt.await_count, 2)
+        self.assertFalse(private.metadata.get("cache_hit", False))
+
     async def test_queue_is_bounded(self):
         engine = ScraplingEngine(max_concurrency=1, max_queue=0, min_interval=0)
         engine._pending = engine._capacity

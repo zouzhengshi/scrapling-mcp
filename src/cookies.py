@@ -55,7 +55,8 @@ def _text(value, field, maximum, *, allow_empty=False) -> str:
     return value
 
 
-def _normalise_cookie(entry: dict, target_host: str, target_scheme: str, allowed_domains: tuple[str, ...]):
+def _normalise_cookie(entry: dict, target_host: str, target_scheme: str,
+                      allowed_domains: tuple[str, ...], *, allow_cross_domain=False):
     if not isinstance(entry, dict):
         raise CookieProfileError("Cookie 项必须是对象")
     raw_url = entry.get("url")
@@ -82,11 +83,11 @@ def _normalise_cookie(entry: dict, target_host: str, target_scheme: str, allowed
     # never accept a broad parent such as .com for an example.com profile.
     if not any(domain == allowed or domain.endswith("." + allowed) for allowed in allowed_domains):
         return None
-    if not _host_matches(target_host, domain):
+    if not allow_cross_domain and not _host_matches(target_host, domain):
         return None
     if entry.get("hostOnly", False) is not False and not isinstance(entry.get("hostOnly"), bool):
         raise CookieProfileError("Cookie hostOnly 必须是布尔值")
-    if entry.get("hostOnly", False) and target_host != domain:
+    if not allow_cross_domain and entry.get("hostOnly", False) and target_host != domain:
         return None
 
     name = _text(entry.get("name"), "name", 256)

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
+from copy import deepcopy
 import logging
 import math
 import os
@@ -24,10 +25,12 @@ logger = logging.getLogger(__name__)
 class ScraplingEngine:
     MAX_TIMEOUT_SECONDS = 120.0
     MAX_OUTPUT_CHARS = 200000
+    MAX_CACHE_ENTRIES = 64
+    MAX_ENGINE_ATTEMPTS = 2
 
     def __init__(self, max_concurrency=3, default_max_chars=50000, *,
                  max_queue=24, min_interval=1.0, allowed_ports=DEFAULT_PORTS,
-                 cookie_file=None, auth_dir=None):
+                 cookie_file=None, auth_dir=None, cache_ttl=30.0):
         for name, value, low, high in (
             ("max_concurrency", max_concurrency, 1, 8),
             ("default_max_chars", default_max_chars, 1, self.MAX_OUTPUT_CHARS),
@@ -39,6 +42,9 @@ class ScraplingEngine:
             raise ValueError("min_interval 必须在 0–60 秒之间")
         if not allowed_ports or any(type(p) is not int or not 1 <= p <= 65535 for p in allowed_ports):
             raise ValueError("allowed_ports 必须是有效端口列表")
+        if (isinstance(cache_ttl, bool) or not isinstance(cache_ttl, (int, float))
+                or not math.isfinite(cache_ttl) or not 0 <= cache_ttl <= 300):
+            raise ValueError("cache_ttl 必须在 0–300 秒之间")
         self._capacity = max_concurrency + max_queue
         self._pending = 0
         self._semaphore = asyncio.Semaphore(max_concurrency)
@@ -48,6 +54,8 @@ class ScraplingEngine:
         self.allowed_ports = tuple(allowed_ports)
         self.cookie_file = cookie_file or os.environ.get("SCRAPLING_COOKIE_FILE")
         self.auth_dir = auth_dir or os.environ.get("SCRAPLING_AUTH_DIR")
+        self._cache_ttl = float(cache_ttl)
+        self._cache: OrderedDict[tuple, tuple[float, ScrapeResult]] = OrderedDict()
 
     def _validate_options(self, mode, timeout, max_chars, css_selector, wait_for, main_content, include_links,
                           cookie_profile, auth_profile):
@@ -85,6 +93,88 @@ class ScraplingEngine:
         if due > now:
             await asyncio.sleep(due - now)
 
+    @staticmethod
+    def _cache_key(url, mode, limit, css_selector, wait_for, main_content,
+                   include_links, cookie_profile, auth_profile):
+        # Authenticated pages are intentionally excluded from the default
+        # cache so private content does not remain in memory after a request.
+        if cookie_profile is not None or auth_profile is not None:
+            return None
+        return (url, mode, limit, css_selector, wait_for, main_content, include_links)
+
+    def _cache_get(self, key):
+        if key is None or not self._cache_ttl:
+            return None
+        item = self._cache.get(key)
+        if item is None:
+            return None
+        created, result = item
+        if time.monotonic() - created > self._cache_ttl:
+            self._cache.pop(key, None)
+            return None
+        self._cache.move_to_end(key)
+        cached = deepcopy(result)
+        cached.metadata = {**cached.metadata, "cache_hit": True}
+        return cached
+
+    def _cache_put(self, key, result):
+        if key is None or not self._cache_ttl or not result.success:
+            return
+        now = time.monotonic()
+        for cache_key, (created, _) in list(self._cache.items()):
+            if now - created > self._cache_ttl:
+                self._cache.pop(cache_key, None)
+        stored = deepcopy(result)
+        stored.metadata = {key: value for key, value in stored.metadata.items() if key != "cache_hit"}
+        self._cache[key] = (now, stored)
+        self._cache.move_to_end(key)
+        while len(self._cache) > self.MAX_CACHE_ENTRIES:
+            self._cache.popitem(last=False)
+
+    @staticmethod
+    def _retry_delay(result, retry_index):
+        retry_after = result.metadata.get("retry_after") if result.metadata else None
+        try:
+            delay = float(retry_after)
+            if math.isfinite(delay) and delay >= 0:
+                return min(delay, 5.0)
+        except (TypeError, ValueError):
+            pass
+        return min(0.5 * (2 ** retry_index), 5.0)
+
+    async def _attempt_with_retries(self, url, engine, budget, options, cookies, auth_state):
+        """Retry only transient failures, within the caller's total budget."""
+        records = []
+        result = None
+        started = time.perf_counter()
+        for retry_index in range(self.MAX_ENGINE_ATTEMPTS):
+            remaining = budget - (time.perf_counter() - started)
+            if remaining <= 0:
+                result = failure(url, engine, "TIMEOUT", "引擎重试预算已耗尽", True)
+                break
+            attempt_start = time.perf_counter()
+            try:
+                async with asyncio.timeout(remaining):
+                    result = await self._attempt(url, engine, remaining, options, cookies, auth_state)
+            except TimeoutError:
+                result = failure(url, engine, "TIMEOUT", "引擎抓取预算已耗尽", True)
+            records.append({
+                "engine": engine,
+                "retry": retry_index,
+                "success": result.success,
+                "error_code": result.error_code,
+                "elapsed_ms": round((time.perf_counter() - attempt_start) * 1000, 2),
+            })
+            if result.success or not result.retryable or retry_index + 1 >= self.MAX_ENGINE_ATTEMPTS:
+                break
+            remaining = budget - (time.perf_counter() - started)
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(self._retry_delay(result, retry_index), remaining))
+        if result is None:
+            result = failure(url, engine, "ENGINE_ERROR", "浏览器工作进程异常退出", True)
+        return result, records
+
     async def scrape(self, url: str, mode="auto", timeout=30.0, max_chars=None, *,
                      css_selector=None, wait_for=None, main_content=True, include_links=True,
                      cookie_profile=None, auth_profile=None) -> ScrapeResult:
@@ -100,6 +190,8 @@ class ScraplingEngine:
         current_engine = "validation"
         cookies = []
         auth_state = None
+        cache_key = None
+        attempt_start = start
         try:
             self._validate_options(mode, timeout, limit, css_selector, wait_for, main_content, include_links,
                                    cookie_profile, auth_profile)
@@ -125,30 +217,41 @@ class ScraplingEngine:
                 async with self._semaphore:
                     current_engine = "validation"
                     safe_url = await validate_url(safe_url, self.allowed_ports)
+                    cache_key = self._cache_key(
+                        safe_url, mode, limit, css_selector, wait_for, main_content,
+                        include_links, cookie_profile, auth_profile,
+                    )
+                    cached = self._cache_get(cache_key)
+                    if cached is not None:
+                        return self._finish(cached, start, cached.attempts, limit)
                     engines = ["crawl4ai", "scrapling"] if mode == "auto" else ["crawl4ai" if mode == "fast" else "scrapling"]
                     for index, current_engine in enumerate(engines):
-                        attempt_start = time.perf_counter()
                         await self._throttle(urlsplit(safe_url).hostname)
                         remaining = deadline - time.perf_counter()
                         if remaining <= 0:
                             raise TimeoutError
                         # Reserve half the remaining budget for stealth in auto mode.
                         budget = remaining / 2 if mode == "auto" and index == 0 else remaining
+                        engine_attempts = []
                         try:
                             async with asyncio.timeout(budget):
-                                result = await self._attempt(safe_url, current_engine, budget, options,
-                                                              cookies, auth_state)
+                                result, engine_attempts = await self._attempt_with_retries(
+                                    safe_url, current_engine, budget, options, cookies, auth_state,
+                                )
                         except TimeoutError:
                             result = failure(safe_url, current_engine, "TIMEOUT", "引擎抓取预算已耗尽", True)
-                        attempts.append({"engine": current_engine, "success": result.success,
-                                         "error_code": result.error_code,
-                                         "elapsed_ms": round((time.perf_counter() - attempt_start) * 1000, 2)})
+                            engine_attempts = [{"engine": current_engine, "retry": 0,
+                                                "success": False, "error_code": "TIMEOUT",
+                                                "elapsed_ms": round(budget * 1000, 2)}]
+                        attempts.extend(engine_attempts)
                         if result.success or result.error_code in {
                             "UNSAFE_URL", "INVALID_ARGUMENT", "HTTP_ERROR", "RATE_LIMITED",
                             "CONTENT_TOO_LARGE", "SELECTOR_NOT_FOUND", "DNS_ERROR",
                         }:
                             break
-                    return self._finish(result, start, attempts, limit)
+                    finished = self._finish(result, start, attempts, limit)
+                    self._cache_put(cache_key, finished)
+                    return finished
         except TimeoutError:
             result = failure(safe_url, current_engine, "TIMEOUT", "总抓取预算已耗尽（含排队、DNS 和引擎切换）", True)
             if current_engine in {"crawl4ai", "scrapling"} and (not attempts or attempts[-1]["engine"] != current_engine):
@@ -164,7 +267,9 @@ class ScraplingEngine:
             result = failure(safe_url, current_engine, "ENGINE_ERROR", "抓取服务内部错误", True)
         finally:
             self._pending -= 1
-        return self._finish(result, start, attempts, limit)
+        finished = self._finish(result, start, attempts, limit)
+        self._cache_put(cache_key, finished)
+        return finished
 
     async def _attempt(self, url, engine, timeout, options, cookies=None, auth_state=None):
         async with EgressProxy(self.allowed_ports) as proxy:

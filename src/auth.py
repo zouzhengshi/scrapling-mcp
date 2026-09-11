@@ -36,6 +36,9 @@ class SitePreset:
 SITE_PRESETS = {
     "bilibili": SitePreset(
         "https://passport.bilibili.com/login", ("bilibili.com",)),
+    "youtube": SitePreset(
+        "https://accounts.google.com/ServiceLogin?service=youtube&continue=https%3A%2F%2Fwww.youtube.com%2F",
+        ("youtube.com", "google.com")),
     "github": SitePreset(
         "https://github.com/login", ("github.com",)),
     "zhihu": SitePreset(
@@ -48,6 +51,7 @@ SITE_PRESETS = {
 
 AUTH_COOKIE_MARKERS = {
     "bilibili": {"SESSDATA", "bili_jct", "DedeUserID"},
+    "youtube": {"SID", "SAPISID", "LOGIN_INFO"},
     "github": {"user_session"},
     "zhihu": {"z_c0"},
     "weibo": {"SUB", "SUBP"},
@@ -84,12 +88,53 @@ _sessions: dict[str, LoginSession] = {}
 LOGIN_BROWSER_FLAGS = [
     "--proxy-bypass-list=<-loopback>",
     "--disable-quic",
+    # The local proxy wraps an upstream HTTP proxy; HTTP/1.1 is more reliable
+    # than Chromium HTTP/2 for this nested CONNECT path.
+    "--disable-http2",
     "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
-    "--disable-background-networking",
     "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
     "--no-first-run",
     "--no-default-browser-check",
 ]
+
+
+def _login_browser_api():
+    """Load the browser driver used for interactive login.
+
+    Patchright is preferred because Google may reject Playwright's bundled
+    Chromium during an interactive sign-in.  ``playwright`` remains an
+    explicit fallback for sites that do not need this compatibility mode.
+    """
+    requested = os.environ.get("SCRAPLING_LOGIN_BROWSER", "auto").strip().lower()
+    if requested not in {"auto", "patchright", "playwright"}:
+        raise AuthProfileError("SCRAPLING_LOGIN_BROWSER 只能是 auto、patchright 或 playwright")
+    if requested in {"auto", "patchright"}:
+        try:
+            from patchright.async_api import TimeoutError as BrowserTimeoutError
+            from patchright.async_api import async_playwright
+            return BrowserTimeoutError, async_playwright, "patchright"
+        except ImportError as exc:
+            if requested == "patchright":
+                raise AuthProfileError("未安装 Patchright，请执行 python -m pip install patchright") from exc
+    try:
+        from playwright.async_api import TimeoutError as BrowserTimeoutError
+        from playwright.async_api import async_playwright
+    except ImportError as exc:
+        raise AuthProfileError("未安装 Playwright，无法打开登录浏览器") from exc
+    return BrowserTimeoutError, async_playwright, "playwright"
+
+
+def _login_browser_channel(driver: str) -> str | None:
+    """Return a safe browser channel override for interactive login."""
+    value = os.environ.get("SCRAPLING_LOGIN_CHANNEL", "chrome").strip().lower()
+    if value in {"", "default", "none"}:
+        return None
+    if value not in {"chrome", "chromium"}:
+        raise AuthProfileError("SCRAPLING_LOGIN_CHANNEL 只能是 chrome、chromium 或留空")
+    # Real Chrome is the default compatibility path for Patchright.  A
+    # Playwright fallback still uses its normal bundled browser unless the
+    # operator explicitly asks for a channel.
+    return value if driver == "patchright" or "SCRAPLING_LOGIN_CHANNEL" in os.environ else None
 
 
 def get_site_preset(site: str) -> SitePreset:
@@ -341,7 +386,10 @@ async def _monitor_login_session(session: LoginSession) -> None:
     timed_out = False
     try:
         while _sessions.get(session.site) is session:
-            if session.context.is_closed() or not session.context.pages:
+            # Google may briefly replace or detach the current page during
+            # the email -> password redirect.  An empty pages snapshot is not
+            # proof that the user finished or abandoned the login.
+            if session.context.is_closed():
                 break
             remaining = session.deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
@@ -360,7 +408,7 @@ async def _monitor_login_session(session: LoginSession) -> None:
         raise
     finally:
         if (_sessions.get(session.site) is session and
-                (session.context.is_closed() or not session.context.pages or timed_out)):
+                (session.context.is_closed() or timed_out)):
             await _close_login_session(session, save=timed_out and not session.context.is_closed())
 
 
@@ -393,9 +441,10 @@ async def _start_login(profile: str, login_url: str,
                                  "本机已有有效登录状态，无需重复打开登录窗口。")
     login_url = normalize_url(login_url)
     try:
-        from playwright.async_api import async_playwright
-    except ImportError as exc:
-        raise AuthProfileError("未安装 Playwright，无法打开登录浏览器") from exc
+        BrowserTimeoutError, async_playwright, browser_driver = _login_browser_api()
+        browser_channel = _login_browser_channel(browser_driver)
+    except AuthProfileError:
+        raise
 
     logger.info("interactive login started profile=%s; use login_status(finalize=true) after login", profile)
     proxy = None
@@ -407,17 +456,37 @@ async def _start_login(profile: str, login_url: str,
         await proxy.__aenter__()
         playwright = await async_playwright().start()
         browser_dir = tempfile.TemporaryDirectory(prefix="scrapling-login-")
+        launch_options = {
+            "headless": False,
+            "proxy": proxy.browser_proxy,
+            "args": LOGIN_BROWSER_FLAGS,
+            "ignore_https_errors": False,
+            "accept_downloads": False,
+            "service_workers": "allow",
+        }
+        if browser_driver == "patchright":
+            # Use the installed Google Chrome binary when available. This is
+            # materially different from launching bundled Playwright Chromium
+            # for Google's sign-in risk checks.
+            launch_options.update({"no_viewport": True})
+        else:
+            launch_options.update({"ignore_default_args": ["--enable-automation"]})
+        if browser_channel:
+            launch_options["channel"] = browser_channel
         context = await playwright.chromium.launch_persistent_context(
-            browser_dir.name,
-            headless=False,
-            proxy=proxy.browser_proxy,
-            args=LOGIN_BROWSER_FLAGS,
-            ignore_https_errors=False,
-            accept_downloads=False,
-            service_workers="allow",
+            browser_dir.name, **launch_options,
         )
         page = context.pages[0] if context.pages else await context.new_page()
-        await page.goto(login_url, wait_until="domcontentloaded", timeout=30_000)
+        navigation_pending = False
+        try:
+            # Login pages may keep subresources open behind a proxy. The user
+            # only needs a usable window, so commit is enough to begin login.
+            await page.goto(login_url, wait_until="commit", timeout=20_000)
+        except BrowserTimeoutError:
+            # Keep the visible context alive; Chromium may still finish loading
+            # after the initial navigation budget and the user can interact.
+            navigation_pending = True
+            logger.warning("interactive login navigation still loading profile=%s", profile)
         session = LoginSession(
             profile, destination, proxy, playwright, context, browser_dir,
             asyncio.get_running_loop().time() + float(timeout),
@@ -427,8 +496,10 @@ async def _start_login(profile: str, login_url: str,
         await _save_state(context, destination, allowed_domains=allowed_domains,
                           metadata=metadata)
         session.monitor = asyncio.create_task(_monitor_login_session(session))
-        return _login_result(profile, "waiting", False,
-                             "登录浏览器已打开。请完成登录；完成后调用 login_status，并设置 finalize=true。")
+        message = "登录浏览器已打开。请完成登录；完成后调用 login_status，并设置 finalize=true。"
+        if navigation_pending:
+            message = "登录浏览器已打开，页面仍在加载中；请等待页面出现后完成登录，再调用 login_status 并设置 finalize=true。"
+        return _login_result(profile, "waiting", False, message)
     except AuthProfileError:
         if context is not None and not context.is_closed():
             await context.close()
@@ -451,6 +522,10 @@ async def _start_login(profile: str, login_url: str,
             browser_dir.cleanup()
         if "executable doesn't exist" in text or "browser was not found" in text:
             raise AuthProfileError("未安装 Chromium，请按 README 安装浏览器") from exc
+        if "err_tunnel_connection_failed" in text:
+            raise AuthProfileError("登录页面无法通过当前代理建立连接，请检查代理地址和代理软件是否正在运行") from exc
+        if "timeout" in text:
+            raise AuthProfileError("登录页面加载超时；请确认 VPN/代理可用后重试") from exc
         raise AuthProfileError("登录浏览器启动或访问失败") from exc
 
 
@@ -491,9 +566,27 @@ async def finish_login(site: str, auth_dir: str | os.PathLike | None = None) -> 
     """Save and close an active login window, then mark the profile ready."""
     _validate_profile_name(site)
     session = _sessions.get(site)
-    if session:
+    destination = _state_path(site, auth_dir)
+    if session and not session.context.is_closed():
+        # Never close an active browser before checking readiness.  Agents can
+        # call finalize early while the user is between Google login steps.
+        try:
+            await _save_state(session.context, session.destination,
+                              allowed_domains=session.allowed_domains,
+                              metadata=session.metadata)
+        except Exception as exc:
+            raise AuthProfileError("登录状态保存失败") from exc
+        document = _read_state(destination)
+        if not _state_is_ready(site, document):
+            raise AuthProfileError("登录尚未完成；登录窗口仍保持打开，请继续完成密码或验证步骤")
         await _finalize_login_session(session)
-    document = _read_state(_state_path(site, auth_dir))
+        # _finalize_login_session saves one final snapshot. Read it again so
+        # the result reflects exactly what was persisted before closing.
+        document = _read_state(destination)
+    else:
+        if session:
+            _sessions.pop(site, None)
+        document = _read_state(destination)
     if not _state_is_ready(site, document):
         raise AuthProfileError("未检测到有效的登录状态；请在弹出的浏览器中完成登录后再确认")
     return _login_result(site, "ready", True,
@@ -507,7 +600,7 @@ async def login_status(site: str, auth_dir: str | os.PathLike | None = None,
     if finalize:
         return await finish_login(site, auth_dir)
     session = _sessions.get(site)
-    if session and not session.context.is_closed() and session.context.pages:
+    if session and not session.context.is_closed():
         try:
             await _save_state(session.context, session.destination,
                               allowed_domains=session.allowed_domains,
@@ -577,7 +670,13 @@ def load_auth_state(site: str | None, target_url: str,
     try:
         allowed_domains = tuple(_domain(domain, "allowed_domains") for domain in allowed_domains)
         for entry in raw_cookies:
-            cookie = _normalise_cookie(entry, target_host, target.scheme.lower(), allowed_domains)
+            # Keep cookies for every explicitly approved login domain. The
+            # browser still enforces each cookie's own domain/hostOnly scope;
+            # this is needed for YouTube's Google sign-in redirect.
+            cookie = _normalise_cookie(
+                entry, target_host, target.scheme.lower(), allowed_domains,
+                allow_cross_domain=True,
+            )
             if cookie is not None:
                 cookies.append(cookie)
     except CookieProfileError as exc:

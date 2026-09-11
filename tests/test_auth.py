@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -39,6 +40,17 @@ class AuthStateTests(unittest.TestCase):
         state = load_auth_state("github", "https://github.com/", self.directory)
         self.assertEqual([item["name"] for item in state["cookies"]], ["user_session"])
         self.assertEqual(state["origins"][0]["localStorage"][0]["name"], "token")
+
+    def test_youtube_state_allows_google_login_cookies(self):
+        (self.directory / "youtube.state.json").write_text(json.dumps({
+            "cookies": [
+                {"name": "SID", "value": "secret", "domain": ".google.com"},
+                {"name": "LOGIN_INFO", "value": "secret", "domain": ".youtube.com"},
+            ],
+            "origins": [],
+        }), encoding="utf-8")
+        state = load_auth_state("youtube", "https://www.youtube.com/", self.directory)
+        self.assertEqual([item["name"] for item in state["cookies"]], ["SID", "LOGIN_INFO"])
 
     def test_domain_cookie_scope_is_preserved_for_subdomains(self):
         state = load_auth_state("github", "https://api.github.com/", self.directory)
@@ -127,7 +139,8 @@ class AuthEngineTests(unittest.IsolatedAsyncioTestCase):
         context = FakeContext()
         playwright = FakePlaywright()
         try:
-            with patch("src.auth.EgressProxy", FakeProxy), \
+            with patch.dict(os.environ, {"SCRAPLING_LOGIN_BROWSER": "playwright"}, clear=False), \
+                 patch("src.auth.EgressProxy", FakeProxy), \
                  patch("playwright.async_api.async_playwright", return_value=FakePlaywrightFactory()):
                 result = await start_login("github", timeout=10, auth_dir=directory)
                 self.assertEqual(result["status"], "waiting")
@@ -194,7 +207,8 @@ class AuthEngineTests(unittest.IsolatedAsyncioTestCase):
         context = FakeContext()
         playwright = FakePlaywright()
         try:
-            with patch("src.auth.EgressProxy", FakeProxy), \
+            with patch.dict(os.environ, {"SCRAPLING_LOGIN_BROWSER": "playwright"}, clear=False), \
+                 patch("src.auth.EgressProxy", FakeProxy), \
                  patch("playwright.async_api.async_playwright", return_value=FakePlaywrightFactory()):
                 result = await start_custom_login(
                     "example-account", "https://example.com/login?state=secret",
@@ -217,6 +231,66 @@ class AuthEngineTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(AuthProfileError):
             await start_custom_login("example-account", "https://example.com/login",
                                      ["127.0.0.1"])
+
+    async def test_finalize_before_login_is_complete_keeps_window_open(self):
+        class FakeContext:
+            def __init__(self):
+                self.closed = False
+                self.pages = []
+
+            def is_closed(self):
+                return self.closed
+
+            async def storage_state(self, path, indexed_db=True):
+                Path(path).write_text(json.dumps({"cookies": [], "origins": []}), encoding="utf-8")
+
+            async def close(self):
+                self.closed = True
+
+        directory = Path(tempfile.mkdtemp(prefix="scrapling-auth-"))
+        context = FakeContext()
+        session = auth_module.LoginSession(
+            "github", directory / "github.state.json", object(), object(),
+            context, object(), 0,
+        )
+        auth_module._sessions["github"] = session
+        try:
+            with self.assertRaises(AuthProfileError) as error:
+                await finish_login("github", directory)
+            self.assertIn("仍保持打开", str(error.exception))
+            self.assertIn("github", auth_module._sessions)
+            self.assertFalse(context.closed)
+        finally:
+            auth_module._sessions.pop("github", None)
+            for path in directory.glob("*"):
+                path.unlink(missing_ok=True)
+            directory.rmdir()
+
+    async def test_login_status_keeps_session_when_page_list_is_temporarily_empty(self):
+        class FakeContext:
+            pages = []
+
+            def is_closed(self):
+                return False
+
+            async def storage_state(self, path, indexed_db=True):
+                Path(path).write_text(json.dumps({"cookies": [], "origins": []}), encoding="utf-8")
+
+        directory = Path(tempfile.mkdtemp(prefix="scrapling-auth-"))
+        session = auth_module.LoginSession(
+            "github", directory / "github.state.json", object(), object(),
+            FakeContext(), object(), 0,
+        )
+        auth_module._sessions["github"] = session
+        try:
+            result = await auth_module.login_status("github", directory)
+            self.assertEqual(result["status"], "waiting")
+            self.assertIn("github", auth_module._sessions)
+        finally:
+            auth_module._sessions.pop("github", None)
+            for path in directory.glob("*"):
+                path.unlink(missing_ok=True)
+            directory.rmdir()
 
     async def test_engine_passes_auth_state_to_worker(self):
         directory = Path(tempfile.mkdtemp(prefix="scrapling-auth-"))

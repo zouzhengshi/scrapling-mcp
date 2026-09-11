@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scrapling-mcp"
+version = "1.2.0"
+description = "安全通用的 AI Agent 网页抓取 MCP 服务"
+readme = "README.md"
+requires-python = ">=3.11"
+
+[project.scripts]
+scrapling-mcp = "src.cli:main"
+smcp = "src.cli:main"
+
+[tool.setuptools]
+packages = ["src"]
+py-modules = ["main"]

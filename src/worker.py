@@ -15,6 +15,7 @@ from src.security import normalize_url, UnsafeUrlError
 BROWSER_FLAGS = [
     "--proxy-bypass-list=<-loopback>",
     "--disable-quic",
+    "--disable-http2",
     "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
     "--disable-background-networking",
     "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",

@@ -1,10 +1,12 @@
 """Real local sockets; no external network. Forbidden destinations must see zero hits."""
 import asyncio
+import os
 import unittest
 from unittest.mock import AsyncMock, patch
 from urllib.parse import urlsplit
 
-from src.egress import EgressProxy
+from src.egress import (EgressProxy, UpstreamProxyError, parse_upstream_proxy,
+                        resolve_proxy_configuration, upstream_proxy_info)
 from src.security import UnsafeUrlError
 
 
@@ -101,3 +103,138 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
             await self.proxy._copy(reader, writer)
         self.assertTrue(self.proxy.limit_exceeded)
         writer.write.assert_not_called()
+
+    async def test_http_upstream_proxy_forwards_http_request_without_credentials(self):
+        upstream_requests = []
+
+        async def upstream(reader, writer):
+            try:
+                upstream_requests.append(await reader.readuntil(b"\r\n\r\n"))
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        upstream_server = await asyncio.start_server(upstream, "127.0.0.1", 0)
+        upstream_port = upstream_server.sockets[0].getsockname()[1]
+        local_proxy = await EgressProxy(
+            allowed_ports=(80, 443),
+            upstream_proxy=f"http://proxy-user:proxy-password@127.0.0.1:{upstream_port}",
+        ).__aenter__()
+        original_proxy = self.proxy
+        self.proxy = local_proxy
+        try:
+            with patch("src.egress.resolve_public", new=AsyncMock(return_value=("93.184.216.34",))):
+                response = await self.request("GET http://example.com/path?q=1 HTTP/1.1")
+            self.assertTrue(response.endswith(b"ok"))
+            self.assertEqual(len(upstream_requests), 1)
+            self.assertIn(b"GET http://example.com:80/path?q=1 HTTP/1.1", upstream_requests[0])
+            self.assertIn(b"Host: example.com:80", upstream_requests[0])
+            self.assertNotIn(b"proxy-password", upstream_requests[0])
+            self.assertNotIn(b"proxy-authorization", upstream_requests[0].lower())
+        finally:
+            await local_proxy.__aexit__()
+            self.proxy = original_proxy
+            upstream_server.close()
+            await upstream_server.wait_closed()
+
+    async def test_http_upstream_proxy_tunnels_https_connect(self):
+        upstream_requests = []
+
+        async def upstream(reader, writer):
+            try:
+                upstream_requests.append(await reader.readuntil(b"\r\n\r\n"))
+                writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                await writer.drain()
+                await reader.read()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        upstream_server = await asyncio.start_server(upstream, "127.0.0.1", 0)
+        upstream_port = upstream_server.sockets[0].getsockname()[1]
+        proxy = EgressProxy(upstream_proxy=f"http://127.0.0.1:{upstream_port}")
+        try:
+            with patch("src.egress.resolve_public", new=AsyncMock(return_value=("93.184.216.34",))):
+                reader, writer = await proxy._connect("www.youtube.com", 443)
+            writer.close()
+            await writer.wait_closed()
+            await asyncio.sleep(0.01)
+        finally:
+            upstream_server.close()
+            await upstream_server.wait_closed()
+        self.assertEqual(len(upstream_requests), 1)
+        self.assertIn(b"CONNECT www.youtube.com:443 HTTP/1.1", upstream_requests[0])
+
+    async def test_socks5_upstream_uses_remote_domain_resolution(self):
+        handshake = {}
+
+        async def upstream(reader, writer):
+            try:
+                handshake["greeting"] = await reader.readexactly(3)
+                writer.write(b"\x05\x00")
+                await writer.drain()
+                header = await reader.readexactly(4)
+                length = (await reader.readexactly(1))[0]
+                handshake["request"] = header + bytes((length,)) + await reader.readexactly(length) + await reader.readexactly(2)
+                writer.write(b"\x05\x00\x00\x01\x7f\x00\x00\x01\x00\x01")
+                await writer.drain()
+                await reader.read()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        upstream_server = await asyncio.start_server(upstream, "127.0.0.1", 0)
+        upstream_port = upstream_server.sockets[0].getsockname()[1]
+        proxy = EgressProxy(upstream_proxy=f"socks5://127.0.0.1:{upstream_port}")
+        try:
+            with patch("src.egress.resolve_public", new=AsyncMock(return_value=("93.184.216.34",))):
+                reader, writer = await proxy._connect("www.youtube.com", 443)
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            upstream_server.close()
+            await upstream_server.wait_closed()
+        self.assertEqual(handshake["greeting"], b"\x05\x01\x00")
+        self.assertEqual(handshake["request"][0:4], b"\x05\x01\x00\x03")
+        host_length = len(b"www.youtube.com")
+        self.assertEqual(handshake["request"][5:5 + host_length], b"www.youtube.com")
+        self.assertEqual(handshake["request"][5 + host_length:], b"\x01\xbb")
+
+    def test_proxy_configuration_is_validated_and_redacted(self):
+        proxy = parse_upstream_proxy("http://proxy-user:proxy-password@127.0.0.1:7890")
+        self.assertEqual(proxy.display, "http://127.0.0.1:7890")
+        self.assertNotIn("proxy-password", proxy.display)
+        self.assertTrue(upstream_proxy_info("http://user:secret@example.com:8080")["authentication"])
+        with self.assertRaises(UpstreamProxyError):
+            parse_upstream_proxy("ftp://127.0.0.1:21")
+
+    def test_auto_mode_reads_proxy_environment_without_exposing_credentials(self):
+        values = {
+            "SCRAPLING_PROXY_MODE": "auto",
+            "SCRAPLING_UPSTREAM_PROXY": "",
+            "HTTP_PROXY": "http://user:secret@127.0.0.1:7890",
+            "HTTPS_PROXY": "socks5://127.0.0.1:7891",
+            "NO_PROXY": "example.com,.internal.test",
+        }
+        with patch.dict(os.environ, values, clear=True):
+            routes, bypass, metadata = resolve_proxy_configuration()
+            info = upstream_proxy_info()
+        self.assertEqual(metadata["mode"], "auto")
+        self.assertEqual(metadata["source"], "proxy_environment")
+        self.assertEqual(routes["http"].display, "http://127.0.0.1:7890")
+        self.assertEqual(routes["https"].display, "socks5://127.0.0.1:7891")
+        self.assertEqual(bypass, ["example.com", ".internal.test"])
+        self.assertEqual(info["routes"]["https"], "socks5://127.0.0.1:7891")
+        self.assertTrue(info["authentication"])
+        self.assertNotIn("secret", str(info))
+
+    def test_proxy_bypass_matches_domains_and_local_hosts(self):
+        proxy = EgressProxy(upstream_proxy="http://127.0.0.1:7890")
+        proxy.no_proxy = ["example.com", ".internal.test", "<local>"]
+        self.assertIsNone(proxy._proxy_for("https", "example.com"))
+        self.assertIsNone(proxy._proxy_for("https", "www.internal.test"))
+        self.assertIsNone(proxy._proxy_for("http", "intranet"))
+        self.assertEqual(proxy._proxy_for("https", "youtube.com").display,
+                         "http://127.0.0.1:7890")
