@@ -16,11 +16,14 @@ jobs:
       fail-fast: false
       matrix:
         os: [windows-latest, ubuntu-latest, macos-latest]
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Install package and browsers
@@ -30,4 +33,4 @@ jobs:
           python -m playwright install chromium
           python -m patchright install chromium
       - name: Run tests
-        run: python -m unittest discover -s tests -q
+        run: python -X faulthandler -m unittest discover -s tests -v

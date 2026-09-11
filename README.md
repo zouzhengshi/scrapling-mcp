@@ -5,6 +5,8 @@
 面向 AI Agent 的安全通用网页抓取 MCP 服务，基于 Crawl4AI 和 Scrapling，
 通过 **stdio MCP** 提供单页、批量抓取和本地交互式登录，也可以直接从 Python 异步调用。
 
+📦 当前版本：`v1.2.0`　📄 许可证：[MIT](LICENSE)　📝 [更新日志](CHANGELOG.md)　🔐 [安全说明](SECURITY.md)
+
 ## 📌 项目是什么
 
 Scrapling MCP 是一个让 AI Agent 能够安全调用网页抓取能力的通用工具服务。
@@ -658,6 +660,7 @@ MCP函数返回 MCP 结果对象，Python 调用方应使用 `src.scrape`。
 
 默认测试使用模拟引擎和本机套接字，不依赖外网；包含真实stdio MCP通信和子进程回收测试。
 仓库中的 GitHub Actions 会在 Windows、Linux 和 macOS 上自动运行这组测试，避免跨平台改动只在开发机上通过。
+浏览器集成测试默认不在 CI 中运行，因为它们需要本机可见浏览器和受控测试网络；可按下方命令在本机显式开启。
 浏览器安装后可运行更慢的、本机网页集成测试：
 
 ```powershell

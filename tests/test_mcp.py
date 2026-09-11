@@ -1,6 +1,7 @@
 """Exercise initialize/list/call/ping on the actual stdio wire protocol."""
 import asyncio
 import json
+import os
 from pathlib import Path
 import sys
 import unittest
@@ -63,7 +64,11 @@ class McpTests(unittest.IsolatedAsyncioTestCase):
         root = Path(__file__).resolve().parent.parent
         parameters = StdioServerParameters(command=sys.executable, args=[str(root / "main.py")],
                                            env={"PYTHONIOENCODING": "utf-8"})
-        async with asyncio.timeout(15):
+        # Cold imports and process startup are noticeably slower on hosted
+        # runners, especially on Windows. Keep the local test fast while
+        # giving CI enough room to exercise the real stdio protocol.
+        startup_timeout = 45 if os.environ.get("CI") else 15
+        async with asyncio.timeout(startup_timeout):
             async with stdio_client(parameters) as (reader, writer):
                 async with ClientSession(reader, writer) as session:
                     initialize_result = await session.initialize()
