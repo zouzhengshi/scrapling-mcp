@@ -39,6 +39,10 @@ class AuthStateTests(unittest.TestCase):
         self.assertEqual([item["name"] for item in state["cookies"]], ["user_session"])
         self.assertEqual(state["origins"][0]["localStorage"][0]["name"], "token")
 
+    def test_domain_cookie_scope_is_preserved_for_subdomains(self):
+        state = load_auth_state("github", "https://api.github.com/", self.directory)
+        self.assertEqual(state["cookies"][0]["domain"], ".github.com")
+
     def test_state_is_scoped_to_preset_domain(self):
         with self.assertRaises(AuthProfileError):
             load_auth_state("github", "https://gist.github.io/", self.directory)

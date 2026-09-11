@@ -23,7 +23,7 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
         self.connections = set()
         self.auth_dir = Path(tempfile.mkdtemp(prefix="scrapling-auth-"))
         (self.auth_dir / "bilibili.state.json").write_text(json.dumps({
-            "cookies": [{"name": "SESSDATA", "value": "ok", "domain": "bilibili.com",
+            "cookies": [{"name": "SESSDATA", "value": "ok", "domain": ".bilibili.com",
                          "path": "/", "secure": False}],
             "origins": [],
         }), encoding="utf-8")

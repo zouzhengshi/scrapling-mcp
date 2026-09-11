@@ -101,7 +101,12 @@ def _normalise_cookie(entry: dict, target_host: str, target_scheme: str, allowed
     if not isinstance(secure, bool) or not isinstance(http_only, bool):
         raise CookieProfileError("Cookie secure/httpOnly 必须是布尔值")
 
-    result = {"name": name, "value": value, "domain": domain, "path": path,
+    # Preserve the leading dot for domain cookies. Playwright uses it to
+    # distinguish a cookie valid on subdomains from a host-only cookie.
+    result_domain = ("." + domain if isinstance(raw_domain, str) and
+                     raw_domain.startswith(".") and not entry.get("hostOnly", False)
+                     else domain)
+    result = {"name": name, "value": value, "domain": result_domain, "path": path,
               "secure": secure, "httpOnly": http_only}
     same_site = entry.get("sameSite")
     if same_site is not None:
