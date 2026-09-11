@@ -1,18 +1,20 @@
-"""Interactive local login profiles for a small set of known sites."""
+"""Interactive local login profiles for preset and user-approved sites."""
 from __future__ import annotations
 
 import asyncio
 import contextlib
 from dataclasses import dataclass
+import ipaddress
 import json
 import logging
 import os
 from pathlib import Path
+import re
 import secrets
 import tempfile
 import time
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from src.cookies import CookieProfileError, _domain, _host_matches, _normalise_cookie
 from src.egress import EgressProxy
@@ -59,6 +61,8 @@ MAX_STATE_ORIGINS = 64
 MAX_LOCAL_STORAGE_ITEMS = 2000
 MAX_LOCAL_STORAGE_CHARS = 1_000_000
 LOGIN_CLEANUP_TIMEOUT = 5.0
+MAX_CUSTOM_DOMAINS = 16
+AUTH_PROFILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
 
 @dataclass
@@ -71,6 +75,8 @@ class LoginSession:
     browser_dir: Any
     deadline: float
     monitor: asyncio.Task | None = None
+    allowed_domains: tuple[str, ...] = ()
+    metadata: dict[str, Any] | None = None
 
 
 _sessions: dict[str, LoginSession] = {}
@@ -91,6 +97,40 @@ def get_site_preset(site: str) -> SitePreset:
         choices = "、".join(SUPPORTED_SITES)
         raise AuthProfileError(f"不支持的网站预设，可选：{choices}")
     return SITE_PRESETS[site]
+
+
+def _validate_profile_name(profile: str) -> str:
+    if not isinstance(profile, str) or not AUTH_PROFILE_NAME.fullmatch(profile):
+        raise AuthProfileError("auth_profile 名称无效")
+    return profile
+
+
+def _normalise_allowed_domains(values, *, field="allowed_domains") -> tuple[str, ...]:
+    if not isinstance(values, (list, tuple)) or not 1 <= len(values) <= MAX_CUSTOM_DOMAINS:
+        raise AuthProfileError(f"{field} 必须包含 1–{MAX_CUSTOM_DOMAINS} 个域名")
+    result = []
+    for value in values:
+        if not isinstance(value, str) or value.startswith("*"):
+            raise AuthProfileError(f"{field} 只能包含明确域名，不支持通配符")
+        try:
+            domain = _domain(value, field)
+        except CookieProfileError as exc:
+            raise AuthProfileError(f"{field} 包含无效域名") from exc
+        if "." not in domain or domain.endswith((".local", ".internal", ".localhost", ".localdomain")):
+            raise AuthProfileError(f"{field} 必须是公网域名")
+        try:
+            ipaddress.ip_address(domain)
+        except ValueError:
+            pass
+        else:
+            raise AuthProfileError(f"{field} 不支持 IP 地址")
+        if domain not in result:
+            result.append(domain)
+    return tuple(result)
+
+
+def _domain_allowed(host: str, allowed_domains: tuple[str, ...]) -> bool:
+    return any(_host_matches(host, domain) for domain in allowed_domains)
 
 
 def _auth_root(auth_dir: str | os.PathLike | None = None) -> Path:
@@ -116,8 +156,7 @@ def _auth_root(auth_dir: str | os.PathLike | None = None) -> Path:
 
 
 def _state_path(site: str, auth_dir: str | os.PathLike | None = None) -> Path:
-    get_site_preset(site)
-    return _auth_root(auth_dir) / f"{site}.state.json"
+    return _auth_root(auth_dir) / f"{_validate_profile_name(site)}.state.json"
 
 
 def _read_state(path: Path) -> dict:
@@ -138,6 +177,70 @@ def _state_has_entries(document: dict) -> bool:
     return bool(document.get("cookies")) or bool(document.get("origins"))
 
 
+def _custom_metadata(profile: str, document: dict) -> dict:
+    raw = document.get("scrapling_auth")
+    if not isinstance(raw, dict) or raw.get("kind") != "custom" or raw.get("profile") != profile:
+        raise AuthProfileError("自定义登录配置无效，请重新登录")
+    allowed_domains = _normalise_allowed_domains(raw.get("allowed_domains"))
+    login_url = raw.get("login_url")
+    try:
+        login_url = normalize_url(login_url)
+    except (TypeError, ValueError) as exc:
+        raise AuthProfileError("自定义登录网址无效") from exc
+    if urlsplit(login_url).scheme != "https":
+        raise AuthProfileError("自定义登录只允许 HTTPS 登录网址")
+    parts = urlsplit(login_url)
+    safe_login_url = urlunsplit((parts.scheme, parts.netloc, parts.path or "/", "", ""))
+    return {"kind": "custom", "profile": profile,
+            "login_url": safe_login_url, "allowed_domains": allowed_domains}
+
+
+def _profile_allowed_domains(profile: str, document: dict | None = None,
+                             auth_dir: str | os.PathLike | None = None) -> tuple[str, ...]:
+    if profile in SITE_PRESETS:
+        return SITE_PRESETS[profile].allowed_domains
+    if document is None:
+        document = _read_state(_state_path(profile, auth_dir))
+    return _custom_metadata(profile, document)["allowed_domains"]
+
+
+def _state_is_ready(profile: str, document: dict) -> bool:
+    if profile in AUTH_COOKIE_MARKERS:
+        return _state_has_authenticated_entries(profile, document)
+    try:
+        _custom_metadata(profile, document)
+    except AuthProfileError:
+        return False
+    return _state_has_entries(document)
+
+
+def _filter_state(document: dict, allowed_domains: tuple[str, ...]) -> dict:
+    safe = dict(document)
+    cookies = []
+    for cookie in document.get("cookies", []):
+        if not isinstance(cookie, dict) or not isinstance(cookie.get("domain"), str):
+            continue
+        try:
+            domain = _domain(cookie["domain"], "Cookie domain")
+        except CookieProfileError:
+            continue
+        if _domain_allowed(domain, allowed_domains):
+            cookies.append(cookie)
+    origins = []
+    for origin in document.get("origins", []):
+        if not isinstance(origin, dict) or not isinstance(origin.get("origin"), str):
+            continue
+        try:
+            host = _domain(urlsplit(origin["origin"]).hostname, "origin")
+        except (CookieProfileError, TypeError, ValueError, UnicodeError):
+            continue
+        if _domain_allowed(host, allowed_domains):
+            origins.append(origin)
+    safe["cookies"] = cookies
+    safe["origins"] = origins
+    return safe
+
+
 def _state_has_authenticated_entries(site: str, document: dict) -> bool:
     markers = AUTH_COOKIE_MARKERS.get(site, set())
     now = time.time()
@@ -153,10 +256,19 @@ def _state_has_authenticated_entries(site: str, document: dict) -> bool:
     return False
 
 
-async def _save_state(context, destination: Path) -> None:
+async def _save_state(context, destination: Path, *,
+                      allowed_domains: tuple[str, ...] = (),
+                      metadata: dict | None = None) -> None:
     temporary = destination.with_name(f".{destination.name}.{secrets.token_hex(8)}.tmp")
     try:
         await context.storage_state(path=str(temporary), indexed_db=True)
+        if allowed_domains or metadata:
+            document = json.loads(temporary.read_text(encoding="utf-8"))
+            if allowed_domains:
+                document = _filter_state(document, allowed_domains)
+            if metadata:
+                document["scrapling_auth"] = metadata
+            temporary.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
         os.replace(temporary, destination)
         if os.name != "nt":
             os.chmod(destination, 0o600)
@@ -182,7 +294,9 @@ async def _close_login_session(session: LoginSession, *, save: bool) -> None:
     save_cause = None
     if save and not session.context.is_closed():
         try:
-            await _save_state(session.context, session.destination)
+            await _save_state(session.context, session.destination,
+                              allowed_domains=session.allowed_domains,
+                              metadata=session.metadata)
         except Exception as exc:
             save_error = AuthProfileError("登录状态保存失败")
             save_cause = exc
@@ -234,7 +348,9 @@ async def _monitor_login_session(session: LoginSession) -> None:
                 timed_out = True
                 break
             try:
-                await _save_state(session.context, session.destination)
+                await _save_state(session.context, session.destination,
+                                  allowed_domains=session.allowed_domains,
+                                  metadata=session.metadata)
             except Exception:
                 # Keep the visible login window alive; status/finalize will
                 # report a safe error if the state cannot be persisted.
@@ -248,31 +364,40 @@ async def _monitor_login_session(session: LoginSession) -> None:
             await _close_login_session(session, save=timed_out and not session.context.is_closed())
 
 
-async def start_login(site: str, timeout: float = 300.0,
-                      auth_dir: str | os.PathLike | None = None,
-                      force: bool = False) -> dict:
+def _custom_login_metadata(profile: str, login_url: str,
+                           allowed_domains: tuple[str, ...]) -> dict:
+    parts = urlsplit(login_url)
+    safe_login_url = urlunsplit((parts.scheme, parts.netloc, parts.path or "/", "", ""))
+    return {"kind": "custom", "profile": profile, "login_url": safe_login_url,
+            "allowed_domains": list(allowed_domains)}
+
+
+async def _start_login(profile: str, login_url: str,
+                       allowed_domains: tuple[str, ...], timeout: float,
+                       auth_dir: str | os.PathLike | None, force: bool,
+                       metadata: dict | None = None) -> dict:
     """Open a visible login browser and return without waiting for the user."""
-    preset = get_site_preset(site)
+    _validate_profile_name(profile)
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 10 <= timeout <= 600:
         raise AuthProfileError("登录等待时间必须在 10–600 秒之间")
-    existing = _sessions.get(site)
+    existing = _sessions.get(profile)
     if existing and not force and not existing.context.is_closed():
-        return _login_result(site, "already_running", False,
+        return _login_result(profile, "already_running", False,
                              "该网站的登录窗口已经打开，请完成登录后调用 login_status 并设置 finalize=true。")
     if existing:
         await _finalize_login_session(existing)
-    destination = _state_path(site, auth_dir)
+    destination = _state_path(profile, auth_dir)
     with contextlib.suppress(AuthProfileError):
-        if _state_has_authenticated_entries(site, _read_state(destination)) and not force:
-            return _login_result(site, "ready", True,
+        if _state_is_ready(profile, _read_state(destination)) and not force:
+            return _login_result(profile, "ready", True,
                                  "本机已有有效登录状态，无需重复打开登录窗口。")
-    login_url = normalize_url(preset.login_url)
+    login_url = normalize_url(login_url)
     try:
         from playwright.async_api import async_playwright
     except ImportError as exc:
         raise AuthProfileError("未安装 Playwright，无法打开登录浏览器") from exc
 
-    logger.info("interactive login started site=%s; use login_status(finalize=true) after login", site)
+    logger.info("interactive login started profile=%s; use login_status(finalize=true) after login", profile)
     proxy = None
     playwright = None
     browser_dir = None
@@ -293,12 +418,16 @@ async def start_login(site: str, timeout: float = 300.0,
         )
         page = context.pages[0] if context.pages else await context.new_page()
         await page.goto(login_url, wait_until="domcontentloaded", timeout=30_000)
-        session = LoginSession(site, destination, proxy, playwright, context, browser_dir,
-                               asyncio.get_running_loop().time() + float(timeout))
-        _sessions[site] = session
-        await _save_state(context, destination)
+        session = LoginSession(
+            profile, destination, proxy, playwright, context, browser_dir,
+            asyncio.get_running_loop().time() + float(timeout),
+            allowed_domains=allowed_domains, metadata=metadata,
+        )
+        _sessions[profile] = session
+        await _save_state(context, destination, allowed_domains=allowed_domains,
+                          metadata=metadata)
         session.monitor = asyncio.create_task(_monitor_login_session(session))
-        return _login_result(site, "waiting", False,
+        return _login_result(profile, "waiting", False,
                              "登录浏览器已打开。请完成登录；完成后调用 login_status，并设置 finalize=true。")
     except AuthProfileError:
         if context is not None and not context.is_closed():
@@ -325,14 +454,47 @@ async def start_login(site: str, timeout: float = 300.0,
         raise AuthProfileError("登录浏览器启动或访问失败") from exc
 
 
+async def start_login(site: str, timeout: float = 300.0,
+                      auth_dir: str | os.PathLike | None = None,
+                      force: bool = False) -> dict:
+    preset = get_site_preset(site)
+    return await _start_login(site, preset.login_url, preset.allowed_domains,
+                              timeout, auth_dir, force)
+
+
+async def start_custom_login(profile: str, url: str,
+                             allowed_domains=None, timeout: float = 300.0,
+                             auth_dir: str | os.PathLike | None = None,
+                             force: bool = False) -> dict:
+    """Open a user-approved custom HTTPS login/target URL."""
+    _validate_profile_name(profile)
+    if profile in SITE_PRESETS:
+        raise AuthProfileError("自定义 auth_profile 不能使用预设网站名称")
+    try:
+        login_url = normalize_url(url)
+        target = urlsplit(login_url)
+        target_host = _domain(target.hostname, "目标域名")
+    except (CookieProfileError, TypeError, ValueError, UnicodeError) as exc:
+        raise AuthProfileError("自定义登录网址无效") from exc
+    if target.scheme != "https":
+        raise AuthProfileError("自定义登录只允许 HTTPS 登录网址")
+    domains = ((target_host,) if allowed_domains is None
+               else _normalise_allowed_domains(allowed_domains))
+    if not _domain_allowed(target_host, domains):
+        raise AuthProfileError("allowed_domains 必须包含登录网址的域名")
+    metadata = _custom_login_metadata(profile, login_url, domains)
+    return await _start_login(profile, login_url, domains, timeout, auth_dir,
+                              force, metadata)
+
+
 async def finish_login(site: str, auth_dir: str | os.PathLike | None = None) -> dict:
     """Save and close an active login window, then mark the profile ready."""
-    get_site_preset(site)
+    _validate_profile_name(site)
     session = _sessions.get(site)
     if session:
         await _finalize_login_session(session)
     document = _read_state(_state_path(site, auth_dir))
-    if not _state_has_authenticated_entries(site, document):
+    if not _state_is_ready(site, document):
         raise AuthProfileError("未检测到有效的登录状态；请在弹出的浏览器中完成登录后再确认")
     return _login_result(site, "ready", True,
                          "登录状态已保存在本机。后续抓取请使用相同的 auth_profile 名称。")
@@ -341,19 +503,21 @@ async def finish_login(site: str, auth_dir: str | os.PathLike | None = None) -> 
 async def login_status(site: str, auth_dir: str | os.PathLike | None = None,
                        finalize: bool = False) -> dict:
     """Report login progress; finalize=True closes the browser and saves state."""
-    get_site_preset(site)
+    _validate_profile_name(site)
     if finalize:
         return await finish_login(site, auth_dir)
     session = _sessions.get(site)
     if session and not session.context.is_closed() and session.context.pages:
         try:
-            await _save_state(session.context, session.destination)
+            await _save_state(session.context, session.destination,
+                              allowed_domains=session.allowed_domains,
+                              metadata=session.metadata)
         except Exception as exc:
             raise AuthProfileError("登录状态保存失败") from exc
         return _login_result(site, "waiting", False,
                              "登录窗口仍在运行。完成登录后再次调用 login_status，并设置 finalize=true。")
     document = _read_state(_state_path(site, auth_dir))
-    if _state_has_authenticated_entries(site, document):
+    if _state_is_ready(site, document):
         return _login_result(site, "ready", True,
                              "已找到本机登录状态；抓取时使用相同的 auth_profile 名称。")
     raise AuthProfileError("尚未检测到有效登录状态，请在登录窗口中完成登录后再确认")
@@ -395,22 +559,23 @@ def load_auth_state(site: str | None, target_url: str,
     """Load only the authenticated state applicable to target_url."""
     if site is None:
         return None
-    preset = get_site_preset(site)
+    _validate_profile_name(site)
     try:
         target = urlsplit(target_url)
         target_host = _domain(target.hostname, "目标域名")
     except (CookieProfileError, TypeError, ValueError, UnicodeError) as exc:
         raise AuthProfileError("目标域名无效") from exc
-    if not any(_host_matches(target_host, domain) for domain in preset.allowed_domains):
+    document = _read_state(_state_path(site, auth_dir))
+    allowed_domains = _profile_allowed_domains(site, document, auth_dir)
+    if not _domain_allowed(target_host, allowed_domains):
         raise AuthProfileError("auth_profile 未授权该目标域名")
 
-    document = _read_state(_state_path(site, auth_dir))
     raw_cookies = document.get("cookies", [])
     if not isinstance(raw_cookies, list) or len(raw_cookies) > MAX_STATE_COOKIES:
         raise AuthProfileError("登录状态 Cookie 数量无效")
     cookies = []
     try:
-        allowed_domains = tuple(_domain(domain, "allowed_domains") for domain in preset.allowed_domains)
+        allowed_domains = tuple(_domain(domain, "allowed_domains") for domain in allowed_domains)
         for entry in raw_cookies:
             cookie = _normalise_cookie(entry, target_host, target.scheme.lower(), allowed_domains)
             if cookie is not None:
@@ -452,6 +617,6 @@ def load_auth_state(site: str | None, target_url: str,
 
     if not cookies and not origins:
         raise AuthProfileError("未找到适用于该目标域名的登录状态，请重新登录")
-    if site == "bilibili" and not _state_has_authenticated_entries(site, document):
-        raise AuthProfileError("未检测到 Bilibili 有效登录状态，请先完成登录")
+    if site in AUTH_COOKIE_MARKERS and not _state_has_authenticated_entries(site, document):
+        raise AuthProfileError("未检测到有效登录状态，请先完成登录")
     return {"cookies": cookies, "origins": origins}

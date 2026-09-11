@@ -55,13 +55,19 @@ class McpTests(unittest.IsolatedAsyncioTestCase):
                 async with ClientSession(reader, writer) as session:
                     await session.initialize()
                     tools = {t.name: t for t in (await session.list_tools()).tools}
-                    self.assertEqual(set(tools), {"login", "login_status", "scrape", "scrape_batch"})
+                    self.assertEqual(set(tools), {
+                        "login", "login_status", "login_custom", "login_custom_status",
+                        "scrape", "scrape_batch",
+                    })
                     self.assertIn("error_code", tools["scrape"].outputSchema["properties"])
                     self.assertIn("cookie_profile", tools["scrape"].inputSchema["properties"])
                     self.assertIn("auth_profile", tools["scrape"].inputSchema["properties"])
                     self.assertEqual(tools["login"].inputSchema["properties"]["site"]["enum"],
                                      ["bilibili", "github", "zhihu", "weibo", "xiaohongshu"])
                     self.assertIn("finalize", tools["login_status"].inputSchema["properties"])
+                    self.assertIn("url", tools["login_custom"].inputSchema["properties"])
+                    self.assertIn("allowed_domains", tools["login_custom"].inputSchema["properties"])
+                    self.assertIn("finalize", tools["login_custom_status"].inputSchema["properties"])
                     denied, ping = await asyncio.gather(
                         session.call_tool("scrape", {"url": "http://127.0.0.1/"}), session.send_ping())
                     self.assertTrue(denied.isError)

@@ -9,7 +9,8 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 import src.auth as auth_module
-from src.auth import AuthProfileError, SUPPORTED_SITES, finish_login, load_auth_state, start_login
+from src.auth import (AuthProfileError, SUPPORTED_SITES, finish_login,
+                      load_auth_state, start_custom_login, start_login)
 from src.engine import ScraplingEngine
 from src.models import ScrapeResult
 
@@ -48,6 +49,21 @@ class AuthStateTests(unittest.TestCase):
             load_auth_state("github", "https://gist.github.io/", self.directory)
         with self.assertRaises(AuthProfileError):
             load_auth_state("missing", "https://github.com/", self.directory)
+
+    def test_custom_profile_is_scoped_to_declared_domains(self):
+        (self.directory / "example-account.state.json").write_text(json.dumps({
+            "cookies": [{"name": "sessionid", "value": "secret", "domain": ".example.com"}],
+            "origins": [],
+            "scrapling_auth": {
+                "kind": "custom", "profile": "example-account",
+                "login_url": "https://example.com/login",
+                "allowed_domains": ["example.com"],
+            },
+        }), encoding="utf-8")
+        state = load_auth_state("example-account", "https://app.example.com/dashboard", self.directory)
+        self.assertEqual(state["cookies"][0]["domain"], ".example.com")
+        with self.assertRaises(AuthProfileError):
+            load_auth_state("example-account", "https://other.example.net/", self.directory)
 
     def test_bilibili_visitor_state_is_not_treated_as_logged_in(self):
         (self.directory / "bilibili.state.json").write_text(json.dumps({
@@ -122,6 +138,85 @@ class AuthEngineTests(unittest.IsolatedAsyncioTestCase):
             for path in directory.glob("*"):
                 path.unlink(missing_ok=True)
             directory.rmdir()
+
+    async def test_custom_login_saves_only_declared_domain_state(self):
+        class FakeProxy:
+            browser_proxy = {}
+
+            def __init__(self, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+        class FakePage:
+            async def goto(self, *args, **kwargs):
+                return None
+
+        class FakeContext:
+            def __init__(self):
+                self.pages = [FakePage()]
+                self.closed = False
+
+            def is_closed(self):
+                return self.closed
+
+            async def storage_state(self, path, indexed_db=True):
+                Path(path).write_text(json.dumps({
+                    "cookies": [
+                        {"name": "sessionid", "value": "secret", "domain": ".example.com"},
+                        {"name": "third_party", "value": "remove", "domain": ".tracker.test"},
+                    ],
+                    "origins": [{"origin": "https://app.example.com", "localStorage": []}],
+                }), encoding="utf-8")
+
+            async def close(self):
+                self.closed = True
+
+        class FakeChromium:
+            async def launch_persistent_context(self, *args, **kwargs):
+                return context
+
+        class FakePlaywright:
+            chromium = FakeChromium()
+
+            async def stop(self):
+                return None
+
+        class FakePlaywrightFactory:
+            async def start(self):
+                return playwright
+
+        directory = Path(tempfile.mkdtemp(prefix="scrapling-custom-auth-"))
+        context = FakeContext()
+        playwright = FakePlaywright()
+        try:
+            with patch("src.auth.EgressProxy", FakeProxy), \
+                 patch("playwright.async_api.async_playwright", return_value=FakePlaywrightFactory()):
+                result = await start_custom_login(
+                    "example-account", "https://example.com/login?state=secret",
+                    ["example.com"], timeout=10, auth_dir=directory,
+                )
+                self.assertEqual(result["status"], "waiting")
+                finished = await finish_login("example-account", directory)
+            self.assertEqual(finished["status"], "ready")
+            document = json.loads((directory / "example-account.state.json").read_text(encoding="utf-8"))
+            self.assertEqual([c["name"] for c in document["cookies"]], ["sessionid"])
+            self.assertEqual(document["scrapling_auth"]["login_url"], "https://example.com:443/login")
+        finally:
+            for path in directory.glob("*"):
+                path.unlink(missing_ok=True)
+            directory.rmdir()
+
+    async def test_custom_login_requires_https_and_public_domain(self):
+        with self.assertRaises(AuthProfileError):
+            await start_custom_login("example-account", "http://example.com/login")
+        with self.assertRaises(AuthProfileError):
+            await start_custom_login("example-account", "https://example.com/login",
+                                     ["127.0.0.1"])
 
     async def test_engine_passes_auth_state_to_worker(self):
         directory = Path(tempfile.mkdtemp(prefix="scrapling-auth-"))

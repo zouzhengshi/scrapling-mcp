@@ -38,7 +38,7 @@ Scrapling MCP 将这些能力统一封装为 MCP 工具，并提供公网 URL �
 | --- | --- |
 | MCP 接入 | 通过 stdio 接入支持 MCP 的 AI Agent |
 | 双引擎抓取 | Crawl4AI 快速模式 + Scrapling 隐身模式 |
-| 交互式登录 | 预设常用网站，打开可见浏览器完成正常登录并保存本机状态 |
+| 交互式登录 | 预设或自定义网站，打开可见浏览器完成正常登录并保存本机状态 |
 | 自动回退 | `auto` 模式在可重试失败时切换备用引擎 |
 | 单页抓取 | 获取标题、状态码、最终 URL 和 Markdown 正文 |
 | 批量抓取 | 一次最多抓取 10 个 URL，并保持输入顺序 |
@@ -148,6 +148,34 @@ Linux 首次安装浏览器可能还需要 `python -m playwright install --with-
 
 登录工具会话只用于用户明确授权的账号和网站，不会代替用户输入密码或验证码，也不承诺绕过网站风控。
 
+### 自定义网站登录
+
+没有预设的网站可以使用 `login_custom`。传入目标页面或登录页面，以及一个自定义的
+`auth_profile` 名称；MCP 会打开可见 Chromium，你在其中手动完成登录，状态只保存在本机。
+
+```json
+{
+  "auth_profile": "example-account",
+  "url": "https://example.com/dashboard",
+  "allowed_domains": ["example.com"],
+  "timeout": 300
+}
+```
+
+如果登录页和目标页属于不同域名，`allowed_domains` 必须明确列出所有需要保存登录状态的公网域名，
+不支持通配符。完成登录后调用：
+
+```json
+{
+  "auth_profile": "example-account",
+  "finalize": true
+}
+```
+
+对应工具为 `login_custom_status`。随后抓取时使用 `auth_profile: "example-account"`。
+自定义登录只允许 HTTPS；不会把密码、验证码或 Cookie 原文返回给 Agent。通用网站无法可靠判断
+登录业务是否成功，因此请在确认登录完成后再调用 `finalize=true`。
+
 ### 手动 Cookie profile
 
 如需读取你有权限访问的登录页面，先在本机创建 Cookie 配置文件，推荐从
@@ -211,7 +239,7 @@ Linux 首次安装浏览器可能还需要 `python -m playwright install --with-
 | main_content | true | 优先提取 main/article，过滤常见导航内容 |
 | include_links | true | 保留 Markdown 链接，并解析相对链接 |
 | cookie_profile | null | 使用服务端本地 Cookie 配置名称，不传递 Cookie 原文 |
-| auth_profile | null | 使用 login 工具保存的本机登录状态名称 |
+| auth_profile | null | 使用 login 或 login_custom 工具保存的本机登录状态名称 |
 
 CSS 参数使用标准 CSS 选择器，不接受 JavaScript、XPath 或 Playwright 专用选择器。
 所有参数在引擎层校验；MCP 层同时提供参数范围和结果 JSON Schema。
@@ -326,7 +354,7 @@ MCP函数返回 MCP 结果对象，Python 调用方应使用 `src.scrape`。
 这些是应用层防护，不是操作系统网络沙箱。公开部署或处理不可信用户时，
 仍应在容器/防火墙层限制出站网络和资源；目前没有验证浏览器漏洞、
 自建会话逃逸进程组、非标准网络栈等对抗场景。
-支持预设网站的本地交互式登录和命名 Cookie profile；尚不支持任意用户脚本、文件下载、PDF解析、递归整站爬取和上游代理。
+支持预设和自定义网站的本地交互式登录，以及命名 Cookie profile；尚不支持任意用户脚本、文件下载、PDF解析、递归整站爬取和上游代理。
 没有自动处理robots.txt；使用者需遵守目标网站的访问规则。
 
 ## 验证
