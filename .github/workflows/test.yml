@@ -64,6 +64,27 @@ jobs:
       - name: Test process cleanup
         if: always()
         run: python -X faulthandler -m unittest discover -s tests -p "test_processes.py" -v
-      - name: Test management terminal
+      - name: Test terminal cookie redaction
         if: always()
-        run: python -X faulthandler -m unittest discover -s tests -p "test_terminal.py" -v
+        run: python -X faulthandler -m unittest tests.test_terminal.TerminalTests.test_cookie_summary_hides_cookie_and_storage_values -v
+      - name: Test terminal tool switch
+        if: always()
+        run: python -X faulthandler -m unittest tests.test_terminal.TerminalTests.test_terminal_can_toggle_a_tool -v
+      - name: Test terminal restart report
+        if: always()
+        run: python -X faulthandler -m unittest tests.test_terminal.TerminalTests.test_restart_reports_when_no_client_owned_server_is_found -v
+      - name: Test terminal help
+        if: always()
+        run: python -X faulthandler -m unittest tests.test_terminal.TerminalTests.test_help_documents_restart_command -v
+      - name: Test terminal agent guide
+        if: always()
+        run: python -X faulthandler -m unittest tests.test_terminal.TerminalTests.test_agent_guide_is_available_without_local_secrets -v
+      - name: Test terminal agent guide JSON
+        if: always()
+        run: python -X faulthandler -m unittest tests.test_terminal.TerminalTests.test_agent_guide_json_is_copyable -v
+      - name: Test machine-specific connection paths
+        if: always()
+        run: python -X faulthandler -m unittest tests.test_terminal.TerminalTests.test_connection_config_uses_the_target_machine_paths -v
+      - name: Test terminal startup
+        if: always()
+        run: python -X faulthandler -m unittest tests.test_terminal.TerminalTests.test_interactive_startup_only_shows_connection_info -v
