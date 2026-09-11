@@ -106,7 +106,7 @@ class TerminalTests(unittest.TestCase):
             project_root=r"F:\checkouts\scrapling-mcp",
         )["mcpServers"]["scrapling"]
         self.assertEqual(config["command"], r"E:\portable\python.exe")
-        self.assertEqual(config["args"], [r"F:\checkouts\scrapling-mcp\main.py"])
+        self.assertEqual(config["args"], [str(Path(r"F:\checkouts\scrapling-mcp") / "main.py")])
 
     def test_interactive_startup_only_shows_connection_info(self):
         output = StringIO()
