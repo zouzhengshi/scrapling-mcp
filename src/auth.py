@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from dataclasses import dataclass
 import json
 import logging
@@ -9,6 +10,7 @@ import os
 from pathlib import Path
 import secrets
 import tempfile
+from typing import Any
 from urllib.parse import urlsplit
 
 from src.cookies import CookieProfileError, _domain, _host_matches, _normalise_cookie
@@ -47,6 +49,21 @@ MAX_STATE_COOKIES = 512
 MAX_STATE_ORIGINS = 64
 MAX_LOCAL_STORAGE_ITEMS = 2000
 MAX_LOCAL_STORAGE_CHARS = 1_000_000
+
+
+@dataclass
+class LoginSession:
+    site: str
+    destination: Path
+    proxy: Any
+    playwright: Any
+    context: Any
+    browser_dir: Any
+    deadline: float
+    monitor: asyncio.Task | None = None
+
+
+_sessions: dict[str, LoginSession] = {}
 
 LOGIN_BROWSER_FLAGS = [
     "--proxy-bypass-list=<-loopback>",
@@ -126,16 +143,78 @@ async def _save_state(context, destination: Path) -> None:
         raise
 
 
-async def interactive_login(site: str, timeout: float = 300.0,
-                            auth_dir: str | os.PathLike | None = None) -> dict:
-    """Open a visible browser and save the user's completed login locally.
+def _login_result(site: str, status: str, ready: bool, message: str) -> dict:
+    return {"success": True, "site": site, "auth_profile": site,
+            "status": status, "ready": ready, "message": message}
 
-    The user closes the browser window after completing login. Snapshots are
-    written periodically so closing the window also acts as confirmation.
-    """
+
+async def _close_login_session(session: LoginSession, *, save: bool) -> None:
+    current = asyncio.current_task()
+    if session.monitor and session.monitor is not current:
+        session.monitor.cancel()
+        await asyncio.gather(session.monitor, return_exceptions=True)
+    save_error = None
+    save_cause = None
+    if save and not session.context.is_closed():
+        try:
+            await _save_state(session.context, session.destination)
+        except Exception as exc:
+            save_error = AuthProfileError("登录状态保存失败")
+            save_cause = exc
+    if not session.context.is_closed():
+        with contextlib.suppress(Exception):
+            await session.context.close()
+    try:
+        with contextlib.suppress(Exception):
+            await session.playwright.stop()
+    finally:
+        with contextlib.suppress(Exception):
+            await session.proxy.__aexit__(None, None, None)
+        with contextlib.suppress(Exception):
+            session.browser_dir.cleanup()
+        _sessions.pop(session.site, None)
+    if save_error:
+        raise save_error from save_cause
+
+
+async def _monitor_login_session(session: LoginSession) -> None:
+    timed_out = False
+    try:
+        while _sessions.get(session.site) is session:
+            if session.context.is_closed() or not session.context.pages:
+                break
+            remaining = session.deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                timed_out = True
+                break
+            try:
+                await _save_state(session.context, session.destination)
+            except Exception:
+                # Keep the visible login window alive; status/finalize will
+                # report a safe error if the state cannot be persisted.
+                logger.error("interactive login state snapshot failed site=%s", session.site)
+            await asyncio.sleep(min(1, max(0.1, remaining)))
+    except asyncio.CancelledError:
+        raise
+    finally:
+        if (_sessions.get(session.site) is session and
+                (session.context.is_closed() or not session.context.pages or timed_out)):
+            await _close_login_session(session, save=timed_out and not session.context.is_closed())
+
+
+async def start_login(site: str, timeout: float = 300.0,
+                      auth_dir: str | os.PathLike | None = None,
+                      force: bool = False) -> dict:
+    """Open a visible login browser and return without waiting for the user."""
     preset = get_site_preset(site)
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 10 <= timeout <= 600:
         raise AuthProfileError("登录等待时间必须在 10–600 秒之间")
+    existing = _sessions.get(site)
+    if existing and not force and not existing.context.is_closed():
+        return _login_result(site, "already_running", False,
+                             "该网站的登录窗口已经打开，请完成登录后调用 login_status 并设置 finalize=true。")
+    if existing:
+        await _close_login_session(existing, save=True)
     destination = _state_path(site, auth_dir)
     login_url = normalize_url(preset.login_url)
     try:
@@ -143,57 +222,104 @@ async def interactive_login(site: str, timeout: float = 300.0,
     except ImportError as exc:
         raise AuthProfileError("未安装 Playwright，无法打开登录浏览器") from exc
 
-    logger.info("interactive login started site=%s; close the browser after login", site)
+    logger.info("interactive login started site=%s; use login_status(finalize=true) after login", site)
+    proxy = None
+    playwright = None
+    browser_dir = None
+    context = None
     try:
-        async with EgressProxy(max_bytes=50_000_000) as proxy:
-            async with async_playwright() as playwright:
-                with tempfile.TemporaryDirectory(prefix="scrapling-login-") as browser_dir:
-                    context = await playwright.chromium.launch_persistent_context(
-                        browser_dir,
-                        headless=False,
-                        proxy=proxy.browser_proxy,
-                        args=LOGIN_BROWSER_FLAGS,
-                        ignore_https_errors=False,
-                        accept_downloads=False,
-                        service_workers="allow",
-                    )
-                    try:
-                        page = context.pages[0] if context.pages else await context.new_page()
-                        await page.goto(login_url, wait_until="domcontentloaded", timeout=30_000)
-                        loop = asyncio.get_running_loop()
-                        deadline = loop.time() + float(timeout)
-                        while loop.time() < deadline:
-                            if context.is_closed() or not context.pages:
-                                break
-                            try:
-                                await _save_state(context, destination)
-                            except Exception as exc:
-                                if context.is_closed():
-                                    break
-                                raise AuthProfileError("登录状态保存失败") from exc
-                            await asyncio.sleep(min(1.0, max(0.1, deadline - loop.time())))
-                        if not context.is_closed():
-                            await _save_state(context, destination)
-                    finally:
-                        if not context.is_closed():
-                            await context.close()
+        proxy = EgressProxy(max_bytes=50_000_000)
+        await proxy.__aenter__()
+        playwright = await async_playwright().start()
+        browser_dir = tempfile.TemporaryDirectory(prefix="scrapling-login-")
+        context = await playwright.chromium.launch_persistent_context(
+            browser_dir.name,
+            headless=False,
+            proxy=proxy.browser_proxy,
+            args=LOGIN_BROWSER_FLAGS,
+            ignore_https_errors=False,
+            accept_downloads=False,
+            service_workers="allow",
+        )
+        page = context.pages[0] if context.pages else await context.new_page()
+        await page.goto(login_url, wait_until="domcontentloaded", timeout=30_000)
+        session = LoginSession(site, destination, proxy, playwright, context, browser_dir,
+                               asyncio.get_running_loop().time() + float(timeout))
+        _sessions[site] = session
+        await _save_state(context, destination)
+        session.monitor = asyncio.create_task(_monitor_login_session(session))
+        return _login_result(site, "waiting", False,
+                             "登录浏览器已打开。请完成登录；完成后调用 login_status，并设置 finalize=true。")
     except AuthProfileError:
+        if context is not None and not context.is_closed():
+            await context.close()
+        if playwright is not None:
+            await playwright.stop()
+        if proxy is not None:
+            await proxy.__aexit__(None, None, None)
+        if browser_dir is not None:
+            browser_dir.cleanup()
         raise
     except Exception as exc:
         text = str(exc).lower()
+        if context is not None and not context.is_closed():
+            await context.close()
+        if playwright is not None:
+            await playwright.stop()
+        if proxy is not None:
+            await proxy.__aexit__(None, None, None)
+        if browser_dir is not None:
+            browser_dir.cleanup()
         if "executable doesn't exist" in text or "browser was not found" in text:
             raise AuthProfileError("未安装 Chromium，请按 README 安装浏览器") from exc
         raise AuthProfileError("登录浏览器启动或访问失败") from exc
 
-    document = _read_state(destination)
+
+async def finish_login(site: str, auth_dir: str | os.PathLike | None = None) -> dict:
+    """Save and close an active login window, then mark the profile ready."""
+    get_site_preset(site)
+    session = _sessions.get(site)
+    if session:
+        await _close_login_session(session, save=not session.context.is_closed())
+    document = _read_state(_state_path(site, auth_dir))
     if not _state_has_entries(document):
-        raise AuthProfileError("没有保存到登录状态；请完成登录后再关闭浏览器")
-    return {
-        "success": True,
-        "site": site,
-        "auth_profile": site,
-        "message": "登录状态已保存在本机。后续抓取请使用相同的 auth_profile 名称。",
-    }
+        raise AuthProfileError("没有保存到登录状态；请先完成登录")
+    return _login_result(site, "ready", True,
+                         "登录状态已保存在本机。后续抓取请使用相同的 auth_profile 名称。")
+
+
+async def login_status(site: str, auth_dir: str | os.PathLike | None = None,
+                       finalize: bool = False) -> dict:
+    """Report login progress; finalize=True closes the browser and saves state."""
+    get_site_preset(site)
+    if finalize:
+        return await finish_login(site, auth_dir)
+    session = _sessions.get(site)
+    if session and not session.context.is_closed() and session.context.pages:
+        try:
+            await _save_state(session.context, session.destination)
+        except Exception as exc:
+            raise AuthProfileError("登录状态保存失败") from exc
+        return _login_result(site, "waiting", False,
+                             "登录窗口仍在运行。完成登录后再次调用 login_status，并设置 finalize=true。")
+    document = _read_state(_state_path(site, auth_dir))
+    if _state_has_entries(document):
+        return _login_result(site, "ready", True,
+                             "已找到本机登录状态；抓取时使用相同的 auth_profile 名称。")
+    raise AuthProfileError("尚未保存登录状态，请先调用 login")
+
+
+async def interactive_login(site: str, timeout: float = 300.0,
+                            auth_dir: str | os.PathLike | None = None) -> dict:
+    """Compatibility helper for callers that intentionally want a blocking flow."""
+    result = await start_login(site, timeout, auth_dir)
+    if result["status"] == "already_running":
+        return result
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + float(timeout)
+    while loop.time() < deadline and site in _sessions:
+        await asyncio.sleep(1)
+    return await finish_login(site, auth_dir)
 
 
 def _same_origin(origin: str, target_url: str) -> bool:

@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from src.auth import AuthProfileError, SUPPORTED_SITES, load_auth_state
+from src.auth import AuthProfileError, SUPPORTED_SITES, finish_login, load_auth_state, start_login
 from src.engine import ScraplingEngine
 from src.models import ScrapeResult
 
@@ -45,6 +45,70 @@ class AuthStateTests(unittest.TestCase):
 
 
 class AuthEngineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_start_login_returns_before_user_finishes(self):
+        class FakeProxy:
+            browser_proxy = {}
+
+            def __init__(self, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+        class FakePage:
+            async def goto(self, *args, **kwargs):
+                return None
+
+        class FakeContext:
+            def __init__(self):
+                self.pages = [FakePage()]
+                self.closed = False
+
+            def is_closed(self):
+                return self.closed
+
+            async def storage_state(self, path, indexed_db=True):
+                Path(path).write_text(json.dumps({
+                    "cookies": [{"name": "session", "value": "secret", "domain": "github.com"}],
+                    "origins": [],
+                }), encoding="utf-8")
+
+            async def close(self):
+                self.closed = True
+
+        class FakeChromium:
+            async def launch_persistent_context(self, *args, **kwargs):
+                return context
+
+        class FakePlaywright:
+            chromium = FakeChromium()
+
+            async def stop(self):
+                return None
+
+        class FakePlaywrightFactory:
+            async def start(self):
+                return playwright
+
+        directory = Path(tempfile.mkdtemp(prefix="scrapling-auth-"))
+        context = FakeContext()
+        playwright = FakePlaywright()
+        try:
+            with patch("src.auth.EgressProxy", FakeProxy), \
+                 patch("playwright.async_api.async_playwright", return_value=FakePlaywrightFactory()):
+                result = await start_login("github", timeout=10, auth_dir=directory)
+                self.assertEqual(result["status"], "waiting")
+                self.assertFalse(result["ready"])
+                finished = await finish_login("github", directory)
+            self.assertEqual(finished["status"], "ready")
+        finally:
+            for path in directory.glob("*"):
+                path.unlink(missing_ok=True)
+            directory.rmdir()
+
     async def test_engine_passes_auth_state_to_worker(self):
         directory = Path(tempfile.mkdtemp(prefix="scrapling-auth-"))
         (directory / "github.state.json").write_text(json.dumps({
