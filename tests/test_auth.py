@@ -1,12 +1,14 @@
 """Interactive authentication profile validation and state scoping tests."""
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import AsyncMock, patch
 
+import src.auth as auth_module
 from src.auth import AuthProfileError, SUPPORTED_SITES, finish_login, load_auth_state, start_login
 from src.engine import ScraplingEngine
 from src.models import ScrapeResult
@@ -132,6 +134,36 @@ class AuthEngineTests(unittest.IsolatedAsyncioTestCase):
                                             auth_profile="github")
             self.assertTrue(result.success)
             self.assertEqual(attempt.await_args.args[5]["cookies"][0]["name"], "user_session")
+        finally:
+            for path in directory.glob("*"):
+                path.unlink(missing_ok=True)
+            directory.rmdir()
+
+    async def test_finalize_does_not_wait_for_stuck_browser_cleanup(self):
+        class ClosedContext:
+            def is_closed(self):
+                return True
+
+        directory = Path(tempfile.mkdtemp(prefix="scrapling-auth-"))
+        (directory / "github.state.json").write_text(json.dumps({
+            "cookies": [{"name": "user_session", "value": "secret", "domain": "github.com"}],
+            "origins": [],
+        }), encoding="utf-8")
+
+        async def stuck_cleanup(*args, **kwargs):
+            await asyncio.Event().wait()
+
+        session = auth_module.LoginSession(
+            "github", directory / "github.state.json", object(), object(),
+            ClosedContext(), object(), 0,
+        )
+        auth_module._sessions["github"] = session
+        try:
+            with patch.object(auth_module, "_close_login_session", stuck_cleanup), \
+                 patch.object(auth_module, "LOGIN_CLEANUP_TIMEOUT", 0.01):
+                result = await finish_login("github", directory)
+            self.assertEqual(result["status"], "ready")
+            self.assertNotIn("github", auth_module._sessions)
         finally:
             for path in directory.glob("*"):
                 path.unlink(missing_ok=True)

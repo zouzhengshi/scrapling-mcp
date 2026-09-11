@@ -58,6 +58,7 @@ MAX_STATE_COOKIES = 512
 MAX_STATE_ORIGINS = 64
 MAX_LOCAL_STORAGE_ITEMS = 2000
 MAX_LOCAL_STORAGE_CHARS = 1_000_000
+LOGIN_CLEANUP_TIMEOUT = 5.0
 
 
 @dataclass
@@ -201,6 +202,27 @@ async def _close_login_session(session: LoginSession, *, save: bool) -> None:
         raise save_error from save_cause
 
 
+def _log_login_cleanup(task: asyncio.Task) -> None:
+    with contextlib.suppress(asyncio.CancelledError):
+        try:
+            task.result()
+        except Exception:
+            logger.exception("interactive login cleanup failed")
+
+
+async def _finalize_login_session(session: LoginSession) -> None:
+    """Close a login session without letting browser cleanup block MCP calls."""
+    _sessions.pop(session.site, None)
+    cleanup = asyncio.create_task(
+        _close_login_session(session, save=not session.context.is_closed()))
+    done, _ = await asyncio.wait({cleanup}, timeout=LOGIN_CLEANUP_TIMEOUT)
+    if done:
+        await cleanup
+        return
+    cleanup.add_done_callback(_log_login_cleanup)
+    logger.warning("interactive login cleanup still running site=%s", session.site)
+
+
 async def _monitor_login_session(session: LoginSession) -> None:
     timed_out = False
     try:
@@ -238,7 +260,7 @@ async def start_login(site: str, timeout: float = 300.0,
         return _login_result(site, "already_running", False,
                              "该网站的登录窗口已经打开，请完成登录后调用 login_status 并设置 finalize=true。")
     if existing:
-        await _close_login_session(existing, save=True)
+        await _finalize_login_session(existing)
     destination = _state_path(site, auth_dir)
     with contextlib.suppress(AuthProfileError):
         if _state_has_authenticated_entries(site, _read_state(destination)) and not force:
@@ -308,7 +330,7 @@ async def finish_login(site: str, auth_dir: str | os.PathLike | None = None) -> 
     get_site_preset(site)
     session = _sessions.get(site)
     if session:
-        await _close_login_session(session, save=not session.context.is_closed())
+        await _finalize_login_session(session)
     document = _read_state(_state_path(site, auth_dir))
     if not _state_has_authenticated_entries(site, document):
         raise AuthProfileError("未检测到有效的登录状态；请在弹出的浏览器中完成登录后再确认")
