@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import secrets
 import tempfile
+import time
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -41,6 +42,14 @@ SITE_PRESETS = {
         "https://passport.weibo.com/", ("weibo.com", "weibo.cn")),
     "xiaohongshu": SitePreset(
         "https://www.xiaohongshu.com/", ("xiaohongshu.com",)),
+}
+
+AUTH_COOKIE_MARKERS = {
+    "bilibili": {"SESSDATA", "bili_jct", "DedeUserID"},
+    "github": {"user_session"},
+    "zhihu": {"z_c0"},
+    "weibo": {"SUB", "SUBP"},
+    "xiaohongshu": {"web_session"},
 }
 
 SUPPORTED_SITES = tuple(SITE_PRESETS)
@@ -126,6 +135,21 @@ def _read_state(path: Path) -> dict:
 
 def _state_has_entries(document: dict) -> bool:
     return bool(document.get("cookies")) or bool(document.get("origins"))
+
+
+def _state_has_authenticated_entries(site: str, document: dict) -> bool:
+    markers = AUTH_COOKIE_MARKERS.get(site, set())
+    now = time.time()
+    for cookie in document.get("cookies", []):
+        if not isinstance(cookie, dict) or cookie.get("name") not in markers:
+            continue
+        if not isinstance(cookie.get("value"), str) or not cookie["value"]:
+            continue
+        expires = cookie.get("expires")
+        if isinstance(expires, (int, float)) and expires > 0 and expires <= now:
+            continue
+        return True
+    return False
 
 
 async def _save_state(context, destination: Path) -> None:
@@ -216,6 +240,10 @@ async def start_login(site: str, timeout: float = 300.0,
     if existing:
         await _close_login_session(existing, save=True)
     destination = _state_path(site, auth_dir)
+    with contextlib.suppress(AuthProfileError):
+        if _state_has_authenticated_entries(site, _read_state(destination)) and not force:
+            return _login_result(site, "ready", True,
+                                 "本机已有有效登录状态，无需重复打开登录窗口。")
     login_url = normalize_url(preset.login_url)
     try:
         from playwright.async_api import async_playwright
@@ -282,8 +310,8 @@ async def finish_login(site: str, auth_dir: str | os.PathLike | None = None) -> 
     if session:
         await _close_login_session(session, save=not session.context.is_closed())
     document = _read_state(_state_path(site, auth_dir))
-    if not _state_has_entries(document):
-        raise AuthProfileError("没有保存到登录状态；请先完成登录")
+    if not _state_has_authenticated_entries(site, document):
+        raise AuthProfileError("未检测到有效的登录状态；请在弹出的浏览器中完成登录后再确认")
     return _login_result(site, "ready", True,
                          "登录状态已保存在本机。后续抓取请使用相同的 auth_profile 名称。")
 
@@ -303,10 +331,10 @@ async def login_status(site: str, auth_dir: str | os.PathLike | None = None,
         return _login_result(site, "waiting", False,
                              "登录窗口仍在运行。完成登录后再次调用 login_status，并设置 finalize=true。")
     document = _read_state(_state_path(site, auth_dir))
-    if _state_has_entries(document):
+    if _state_has_authenticated_entries(site, document):
         return _login_result(site, "ready", True,
                              "已找到本机登录状态；抓取时使用相同的 auth_profile 名称。")
-    raise AuthProfileError("尚未保存登录状态，请先调用 login")
+    raise AuthProfileError("尚未检测到有效登录状态，请在登录窗口中完成登录后再确认")
 
 
 async def interactive_login(site: str, timeout: float = 300.0,
@@ -402,4 +430,6 @@ def load_auth_state(site: str | None, target_url: str,
 
     if not cookies and not origins:
         raise AuthProfileError("未找到适用于该目标域名的登录状态，请重新登录")
+    if site == "bilibili" and not _state_has_authenticated_entries(site, document):
+        raise AuthProfileError("未检测到 Bilibili 有效登录状态，请先完成登录")
     return {"cookies": cookies, "origins": origins}

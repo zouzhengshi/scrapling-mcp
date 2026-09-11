@@ -23,7 +23,7 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
         self.connections = set()
         self.auth_dir = Path(tempfile.mkdtemp(prefix="scrapling-auth-"))
         (self.auth_dir / "bilibili.state.json").write_text(json.dumps({
-            "cookies": [{"name": "session", "value": "ok", "domain": "bilibili.com",
+            "cookies": [{"name": "SESSDATA", "value": "ok", "domain": "bilibili.com",
                          "path": "/", "secure": False}],
             "origins": [],
         }), encoding="utf-8")
@@ -42,7 +42,9 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
                 raw = await reader.readuntil(b"\r\n\r\n")
                 path = raw.split(b" ")[1].decode()
                 self.hits.append(path)
-                has_cookie = b"cookie: session=ok" in raw.lower()
+                lowered = raw.lower()
+                has_cookie = (b"cookie: session=ok" in lowered or
+                              b"cookie: sessdata=ok" in lowered)
                 secret = f"http://127.0.0.1:{self.port}/secret"
                 status = "200 OK"
                 extra = ""

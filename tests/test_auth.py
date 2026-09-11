@@ -17,7 +17,7 @@ class AuthStateTests(unittest.TestCase):
         self.directory = Path(tempfile.mkdtemp(prefix="scrapling-auth-"))
         (self.directory / "github.state.json").write_text(json.dumps({
             "cookies": [
-                {"name": "session", "value": "secret", "domain": ".github.com",
+                {"name": "user_session", "value": "secret", "domain": ".github.com",
                  "path": "/", "secure": True, "httpOnly": True, "sameSite": "Lax"},
                 {"name": "other", "value": "not-for-target", "domain": "other.test"},
             ],
@@ -34,7 +34,7 @@ class AuthStateTests(unittest.TestCase):
     def test_known_sites_are_available(self):
         self.assertIn("bilibili", SUPPORTED_SITES)
         state = load_auth_state("github", "https://github.com/", self.directory)
-        self.assertEqual([item["name"] for item in state["cookies"]], ["session"])
+        self.assertEqual([item["name"] for item in state["cookies"]], ["user_session"])
         self.assertEqual(state["origins"][0]["localStorage"][0]["name"], "token")
 
     def test_state_is_scoped_to_preset_domain(self):
@@ -42,6 +42,14 @@ class AuthStateTests(unittest.TestCase):
             load_auth_state("github", "https://gist.github.io/", self.directory)
         with self.assertRaises(AuthProfileError):
             load_auth_state("missing", "https://github.com/", self.directory)
+
+    def test_bilibili_visitor_state_is_not_treated_as_logged_in(self):
+        (self.directory / "bilibili.state.json").write_text(json.dumps({
+            "cookies": [{"name": "buvid3", "value": "visitor", "domain": ".bilibili.com"}],
+            "origins": [],
+        }), encoding="utf-8")
+        with self.assertRaises(AuthProfileError):
+            load_auth_state("bilibili", "https://api.bilibili.com/", self.directory)
 
 
 class AuthEngineTests(unittest.IsolatedAsyncioTestCase):
@@ -72,7 +80,7 @@ class AuthEngineTests(unittest.IsolatedAsyncioTestCase):
 
             async def storage_state(self, path, indexed_db=True):
                 Path(path).write_text(json.dumps({
-                    "cookies": [{"name": "session", "value": "secret", "domain": "github.com"}],
+                    "cookies": [{"name": "user_session", "value": "secret", "domain": "github.com"}],
                     "origins": [],
                 }), encoding="utf-8")
 
@@ -112,7 +120,7 @@ class AuthEngineTests(unittest.IsolatedAsyncioTestCase):
     async def test_engine_passes_auth_state_to_worker(self):
         directory = Path(tempfile.mkdtemp(prefix="scrapling-auth-"))
         (directory / "github.state.json").write_text(json.dumps({
-            "cookies": [{"name": "session", "value": "secret", "domain": "github.com"}],
+                    "cookies": [{"name": "user_session", "value": "secret", "domain": "github.com"}],
             "origins": [],
         }), encoding="utf-8")
         try:
@@ -123,7 +131,7 @@ class AuthEngineTests(unittest.IsolatedAsyncioTestCase):
                 result = await engine.scrape("https://github.com", "fast", 2,
                                             auth_profile="github")
             self.assertTrue(result.success)
-            self.assertEqual(attempt.await_args.args[5]["cookies"][0]["name"], "session")
+            self.assertEqual(attempt.await_args.args[5]["cookies"][0]["name"], "user_session")
         finally:
             for path in directory.glob("*"):
                 path.unlink(missing_ok=True)
