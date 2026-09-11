@@ -69,7 +69,13 @@ Scrapling MCP 将这些能力统一封装为 MCP 工具，并提供公网 URL �
 
 需要 Python 3.11+。建议在项目目录中使用独立虚拟环境。
 
-下面的命令均使用项目目录下的相对路径，不依赖项目被克隆到哪个盘符或哪个用户名目录。
+下面的命令均使用项目目录下的相对路径，不依赖项目被克隆到哪个盘符、目录或用户名目录。
+
+| 平台 | 支持情况 | 推荐启动方式 |
+| --- | --- | --- |
+| 🪟 Windows | 完整支持 | `scrapling.bat` 或 `scrapling-mcp` |
+| 🐧 Linux | 完整支持 | `scrapling-mcp` |
+| 🍎 macOS | 完整支持 | `scrapling-mcp` |
 
 ### 1️⃣ 从 GitHub 获取项目
 
@@ -78,7 +84,7 @@ git clone https://github.com/zouzhengshi/scrapling-mcp.git
 cd scrapling-mcp
 ```
 
-### 2️⃣ 创建环境并安装依赖
+### 2️⃣ Windows：创建环境并安装依赖
 
 ```powershell
 python -m venv scrapling_env
@@ -89,14 +95,31 @@ python -m venv scrapling_env
 .\scrapling_env\Scripts\python.exe main.py --check
 ```
 
-Linux/macOS 将解释器路径换成 `scrapling_env/bin/python`；
-Linux 首次安装浏览器可能还需要 `python -m playwright install --with-deps chromium`。
+### 3️⃣ Linux / macOS：创建环境并安装依赖
+
+```bash
+python3 -m venv scrapling_env
+./scrapling_env/bin/python -m pip install --upgrade pip
+./scrapling_env/bin/python -m pip install -r requirements.txt
+./scrapling_env/bin/python -m pip install -e . --no-deps
+./scrapling_env/bin/python -m playwright install chromium
+./scrapling_env/bin/python -m patchright install chromium
+./scrapling_env/bin/python main.py --check
+```
+
+Linux 服务器首次安装 Playwright 浏览器时，可能还需要：
+
+```bash
+./scrapling_env/bin/python -m playwright install --with-deps chromium
+```
+
+如果系统没有 `python3` 命令，也可以使用发行版提供的 Python 3.11+ 命令。
 直接依赖版本已固定，传递依赖没有完整锁定。
 
 `--check` 只检查依赖版本和浏览器文件是否存在，不访问网络，也不保证网页抓取一定成功。
 `--help` 查看命令说明；不带参数启动 stdio 服务，等待 MCP 客户端消息。
 
-### 3️⃣ Windows 快速启动
+### 4️⃣ Windows 快速启动
 
 安装完成后，先激活虚拟环境：
 
@@ -127,6 +150,37 @@ scrapling-mcp --agent-guide
 
 注意：依赖库本身已经提供了 `scrapling` 命令（用于 Scrapling 库的其他功能），
 因此本项目 CLI 使用 `scrapling-mcp`，避免覆盖或混淆已有命令。
+
+### 5️⃣ Linux / macOS 快速启动
+
+激活虚拟环境：
+
+```bash
+source scrapling_env/bin/activate
+```
+
+启动管理终端：
+
+```bash
+scrapling-mcp
+```
+
+常用命令：
+
+```bash
+scrapling-mcp status
+scrapling-mcp cookies
+scrapling-mcp tools
+scrapling-mcp guide
+scrapling-mcp restart
+scrapling-mcp --check
+```
+
+Linux/macOS 不使用 `scrapling.bat`；如果不想激活虚拟环境，可以直接调用：
+
+```bash
+./scrapling_env/bin/scrapling-mcp status
+```
 
 ### 🖥️ 通过 CLI 调用核心 MCP 工具
 
