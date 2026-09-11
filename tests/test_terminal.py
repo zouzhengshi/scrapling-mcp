@@ -7,6 +7,7 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 import tempfile
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -113,7 +114,10 @@ class TerminalTests(unittest.TestCase):
             self.assertEqual(run_terminal([]), 0)
         text = output.getvalue()
         self.assertIn("MCP 连接方式", text)
-        self.assertIn("scrapling_env", text)
+        # CI uses the runner's Python installation rather than the local
+        # project's venv; assert the generated machine-specific executable
+        # instead of assuming a Windows-only environment name.
+        self.assertIn(str(Path(sys.executable)), text)
         self.assertNotIn("不要要求用户把密码", text)
 
 
