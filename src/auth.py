@@ -31,31 +31,32 @@ class AuthProfileError(ValueError):
 class SitePreset:
     login_url: str
     allowed_domains: tuple[str, ...]
+    auth_cookie_markers: frozenset[str] = frozenset()
 
 
 SITE_PRESETS = {
     "bilibili": SitePreset(
-        "https://passport.bilibili.com/login", ("bilibili.com",)),
+        "https://passport.bilibili.com/login", ("bilibili.com",),
+        frozenset({"SESSDATA", "bili_jct", "DedeUserID"})),
     "youtube": SitePreset(
         "https://accounts.google.com/ServiceLogin?service=youtube&continue=https%3A%2F%2Fwww.youtube.com%2F",
-        ("youtube.com", "google.com")),
+        ("youtube.com", "google.com"), frozenset({"SID", "SAPISID", "LOGIN_INFO"})),
     "github": SitePreset(
-        "https://github.com/login", ("github.com",)),
+        "https://github.com/login", ("github.com",), frozenset({"user_session"})),
     "zhihu": SitePreset(
-        "https://www.zhihu.com/signin", ("zhihu.com",)),
+        "https://www.zhihu.com/signin", ("zhihu.com",), frozenset({"z_c0"})),
     "weibo": SitePreset(
-        "https://passport.weibo.com/", ("weibo.com", "weibo.cn")),
+        "https://passport.weibo.com/", ("weibo.com", "weibo.cn"),
+        frozenset({"SUB", "SUBP"})),
     "xiaohongshu": SitePreset(
-        "https://www.xiaohongshu.com/", ("xiaohongshu.com",)),
+        "https://www.xiaohongshu.com/", ("xiaohongshu.com",), frozenset({"web_session"})),
 }
 
+# Compatibility export for callers that used the old mapping.  The registry
+# above is the source of truth, so adding a preset cannot silently forget the
+# corresponding authenticated-cookie check.
 AUTH_COOKIE_MARKERS = {
-    "bilibili": {"SESSDATA", "bili_jct", "DedeUserID"},
-    "youtube": {"SID", "SAPISID", "LOGIN_INFO"},
-    "github": {"user_session"},
-    "zhihu": {"z_c0"},
-    "weibo": {"SUB", "SUBP"},
-    "xiaohongshu": {"web_session"},
+    site: set(preset.auth_cookie_markers) for site, preset in SITE_PRESETS.items()
 }
 
 SUPPORTED_SITES = tuple(SITE_PRESETS)
@@ -287,7 +288,8 @@ def _filter_state(document: dict, allowed_domains: tuple[str, ...]) -> dict:
 
 
 def _state_has_authenticated_entries(site: str, document: dict) -> bool:
-    markers = AUTH_COOKIE_MARKERS.get(site, set())
+    preset = SITE_PRESETS.get(site)
+    markers = preset.auth_cookie_markers if preset else frozenset()
     now = time.time()
     for cookie in document.get("cookies", []):
         if not isinstance(cookie, dict) or cookie.get("name") not in markers:
@@ -326,8 +328,16 @@ async def _save_state(context, destination: Path, *,
 
 
 def _login_result(site: str, status: str, ready: bool, message: str) -> dict:
+    is_preset = site in SITE_PRESETS
+    if ready:
+        next_action = f"抓取需要登录的网页时使用 auth_profile=\"{site}\""
+    elif is_preset:
+        next_action = "用户完成登录后调用 login_status(site, finalize=true)；不要重复调用 login"
+    else:
+        next_action = "用户完成登录后调用 login_custom_status(auth_profile, finalize=true)；不要重复调用 login_custom"
     return {"success": True, "site": site, "auth_profile": site,
-            "status": status, "ready": ready, "message": message}
+            "status": status, "ready": ready, "message": message,
+            "next_action": next_action}
 
 
 async def _close_login_session(session: LoginSession, *, save: bool) -> None:

@@ -88,8 +88,7 @@ cd scrapling-mcp
 
 ```powershell
 python -m venv scrapling_env
-.\scrapling_env\Scripts\python.exe -m pip install -r requirements.txt
-.\scrapling_env\Scripts\python.exe -m pip install -e . --no-deps
+.\scrapling_env\Scripts\python.exe -m pip install -e .
 .\scrapling_env\Scripts\python.exe -m playwright install chromium
 .\scrapling_env\Scripts\python.exe -m patchright install chromium
 .\scrapling_env\Scripts\python.exe main.py --check
@@ -100,8 +99,7 @@ python -m venv scrapling_env
 ```bash
 python3 -m venv scrapling_env
 ./scrapling_env/bin/python -m pip install --upgrade pip
-./scrapling_env/bin/python -m pip install -r requirements.txt
-./scrapling_env/bin/python -m pip install -e . --no-deps
+./scrapling_env/bin/python -m pip install -e .
 ./scrapling_env/bin/python -m playwright install chromium
 ./scrapling_env/bin/python -m patchright install chromium
 ./scrapling_env/bin/python main.py --check
@@ -116,8 +114,8 @@ Linux 服务器首次安装 Playwright 浏览器时，可能还需要：
 如果系统没有 `python3` 命令，也可以使用发行版提供的 Python 3.11+ 命令。
 直接依赖版本已固定，传递依赖没有完整锁定。
 
-`--check` 只检查依赖版本和浏览器文件是否存在，不访问网络，也不保证网页抓取一定成功。
-`--help` 查看命令说明；不带参数启动 stdio 服务，等待 MCP 客户端消息。
+`--check` 只检查依赖版本、浏览器文件和运行环境变量，不访问网络，也不保证网页抓取一定成功。
+`--help` 查看命令说明；stdio 服务应由 MCP 客户端启动，不要把管理终端配置成 MCP 服务。
 
 ### 4️⃣ Windows 快速启动
 
@@ -130,7 +128,7 @@ Linux 服务器首次安装 Playwright 浏览器时，可能还需要：
 然后可以使用 CLI 命令启动管理终端：
 
 ```powershell
-scrapling-mcp
+scrapling-mcp terminal
 ```
 
 常用命令也可以直接跟在 CLI 命令后面：
@@ -139,14 +137,16 @@ scrapling-mcp
 scrapling-mcp status
 scrapling-mcp guide
 scrapling-mcp restart
+scrapling-mcp doctor
 scrapling-mcp --check
 scrapling-mcp --agent-guide
 ```
 
 也提供短别名 `smcp`，例如 `smcp status`。如果不想激活虚拟环境，仍可以使用项目根目录的
-`.\scrapling.bat status`。脚本会根据自身所在位置自动定位项目目录和 `scrapling_env` 虚拟环境，
-所以项目放在其他磁盘或目录也不需要修改脚本。
+`.\scrapling.bat status`。脚本会根据自身所在位置自动定位项目目录和 `scrapling_env`、`.venv` 或 `venv`，
+所以项目放在其他磁盘或目录也不需要修改脚本；也可以用 `SCRAPLING_PYTHON` 指定解释器。
 `scrapling-mcp --mcp` 可以手动启动 stdio 服务，但通常应让 MCP 客户端按配置自动启动。
+`scrapling-mcp` 在真正的交互终端中仍会自动进入管理终端；在脚本、管道或 CI 中只显示帮助，不会阻塞等待输入。
 
 注意：依赖库本身已经提供了 `scrapling` 命令（用于 Scrapling 库的其他功能），
 因此本项目 CLI 使用 `scrapling-mcp`，避免覆盖或混淆已有命令。
@@ -162,7 +162,7 @@ source scrapling_env/bin/activate
 启动管理终端：
 
 ```bash
-scrapling-mcp
+scrapling-mcp terminal
 ```
 
 常用命令：
@@ -170,10 +170,12 @@ scrapling-mcp
 ```bash
 scrapling-mcp status
 scrapling-mcp cookies
+scrapling-mcp profiles
 scrapling-mcp tools
 scrapling-mcp guide
 scrapling-mcp restart
 scrapling-mcp --check
+scrapling-mcp doctor
 ```
 
 Linux/macOS 不使用 `scrapling.bat`；如果不想激活虚拟环境，可以直接调用：
@@ -184,10 +186,12 @@ Linux/macOS 不使用 `scrapling.bat`；如果不想激活虚拟环境，可以�
 
 ### 🖥️ 通过 CLI 调用核心 MCP 工具
 
-Agent 如果拥有终端权限，也可以直接调用全部核心功能。工具命令默认输出 JSON，便于 Agent 判断结果：
+Agent 如果拥有终端权限，也可以直接调用全部核心功能。工具命令在交互终端默认输出人类可读文本，
+在管道/脚本中默认输出 JSON；也可以显式使用 `--format human` 或 `--format json`：
 
 ```powershell
 scrapling-mcp scrape "https://example.com"
+scrapling-mcp scrape "https://example.com" --format json
 scrapling-mcp scrape_batch "https://example.com" "https://www.python.org"
 scrapling-mcp scrape "https://example.com" --auth-profile github
 
@@ -198,7 +202,7 @@ scrapling-mcp login_custom_status my-site --finalize
 ```
 
 `login` 和 `login_custom` 会保持 CLI 进程运行，直到用户完成登录并关闭可见浏览器窗口，
-然后自动保存本机登录状态并返回 JSON。之后抓取登录页面时使用对应的 `--auth-profile`。
+然后自动保存本机登录状态并返回结果。之后抓取登录页面时使用对应的 `--auth-profile`。
 CLI 也会把这些核心工具调用记录到调用日志；密码、验证码和 Cookie 原文不会作为命令参数要求输入。
 
 ### 🛠️ 本地管理终端
@@ -215,12 +219,14 @@ CLI 也会把这些核心工具调用记录到调用日志；密码、验证码�
 | --- | --- | --- |
 | `status` | 查看程序是否就绪、进程、依赖、浏览器和配置状态 | `status` |
 | `cookies` | 查看已有登录配置的名称、域名、Cookie 名称和数量 | `cookies` |
+| `profiles` | `cookies` 的快捷别名 | `profiles` |
 | `tools` | 查看 6 个 MCP 工具当前是否启用 | `tools` |
 | `guide` | 显示可直接复制给其他 AI Agent 的完整使用说明 | `guide` |
 | `logs` | 查看运行日志、调用日志的位置和最近记录 | `logs` |
 | `logs calls` | 查看最近什么时候、哪个程序调用了什么工具 | `logs calls` |
 | `logs runtime` | 查看服务启动、停止和异常记录 | `logs runtime` |
 | `restart` | 停止当前项目的 MCP 进程，让 MCP 客户端自动重新拉起服务；不会删除 Cookie 或日志 | `restart` |
+| `doctor` | 检查依赖、浏览器和环境变量配置 | `doctor` |
 | `tool disable NAME` | 暂停一个工具，后续调用会返回 `TOOL_DISABLED` | `tool disable scrape_batch` |
 | `tool enable NAME` | 恢复一个工具 | `tool enable scrape_batch` |
 | `help` | 在终端显示每条命令的中文说明 | `help` |
@@ -246,14 +252,16 @@ CLI 也会把这些核心工具调用记录到调用日志；密码、验证码�
 
 终端只显示 Cookie 名称和数量，始终隐藏 Cookie 值、localStorage 值和密码。
 `restart` 只重启当前项目的 MCP 服务进程树，不会删除登录状态、Cookie 或日志。由于 stdio 服务由 MCP 客户端托管，
-终端会停止旧进程并等待客户端自动拉起新进程；如果客户端没有自动恢复，请在客户端中重新连接该 MCP 服务。
+终端会停止旧进程并等待客户端自动拉起新进程；只有检测到新进程时才报告重启成功，
+否则会明确提示你在客户端中重新连接该 MCP 服务。
 工具开关保存在本机用户配置目录，也可通过 `SCRAPLING_CONFIG_FILE` 指定配置文件。
 运行日志默认保存到 `%LOCALAPPDATA%\ScraplingMCP\logs\runtime.log`，调用日志默认保存到
 `%LOCALAPPDATA%\ScraplingMCP\logs\calls.jsonl`，也可通过 `SCRAPLING_LOG_DIR` 指定日志目录。
-调用日志会记录调用时间、调用方名称、调用方 PID、工具名、目标域名、结果和耗时。
+调用日志会记录调用时间、调用方名称、调用方 PID、工具名、目标域名、结果和耗时；不会记录父进程完整命令行，
+避免把客户端参数中的 Token、Cookie 或其他敏感信息带入日志。
 stdio 模式无法自动可靠识别所有客户端，建议在 MCP 客户端配置中设置
 `SCRAPLING_CALLER_NAME`，例如 `Codex`、`Claude Desktop` 或你的软件名称。
-未设置时服务会尽量记录父进程名称和 PID。
+未设置时服务会尽量记录父进程名称和 PID，但不会记录父进程命令行。
 停用工具后，后续调用会立即返回 `TOOL_DISABLED`；由于 MCP 客户端通常会缓存工具列表，
 该工具名称可能仍显示在列表中，但不会执行抓取或登录操作。
 
@@ -321,6 +329,10 @@ scrapling-mcp guide
 认证目录可以省略，程序会自动使用本机用户目录；如果使用手动 Cookie profile，必须设置
 `SCRAPLING_COOKIE_FILE`，并填写目标电脑上的实际路径。只有需要自定义登录状态目录时，才设置
 `SCRAPLING_AUTH_DIR`。这些路径都不应写死在仓库配置中。
+可调运行参数会在 `doctor`/`--check` 中校验：`SCRAPLING_MAX_CONCURRENCY` 为 1–8，
+`SCRAPLING_MAX_QUEUE` 为 0–128，`SCRAPLING_MIN_INTERVAL` 为 0–60 秒，
+`SCRAPLING_CACHE_TTL` 为 0–300 秒，`SCRAPLING_ALLOWED_PORTS` 为逗号分隔的 1–65535 端口。
+认证状态文件包含浏览器登录态，属于敏感本机数据；不要提交到 Git，也不要复制给 Agent 或其他人。
 无需设置工作目录。当前不提供 HTTP 监听、远程认证或多租户服务。
 
 ### 🌐 VPN / 上游代理出口
@@ -332,7 +344,7 @@ scrapling-mcp guide
 "SCRAPLING_PROXY_MODE": "auto"
 ```
 
-自动模式的优先级是：显式的 `SCRAPLING_UPSTREAM_PROXY` > Windows 静态系统代理或常见代理环境变量 > 系统直连路由。
+自动模式的优先级是：显式的 `SCRAPLING_UPSTREAM_PROXY` > 当前系统可读取的静态代理或常见代理环境变量 > 系统直连路由。
 因此 Agent 不需要判断某个网站是否需要代理；服务会在每个目标请求发送前按目标协议选择对应出口，并应用系统代理的绕过列表。
 系统级 VPN 仍然由操作系统负责路由，服务不会自动启动或关闭 VPN。
 
@@ -645,6 +657,7 @@ MCP函数返回 MCP 结果对象，Python 调用方应使用 `src.scrape`。
 ```
 
 默认测试使用模拟引擎和本机套接字，不依赖外网；包含真实stdio MCP通信和子进程回收测试。
+仓库中的 GitHub Actions 会在 Windows、Linux 和 macOS 上自动运行这组测试，避免跨平台改动只在开发机上通过。
 浏览器安装后可运行更慢的、本机网页集成测试：
 
 ```powershell

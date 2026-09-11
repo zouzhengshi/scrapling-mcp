@@ -16,6 +16,7 @@ import ipaddress
 import os
 import secrets
 import socket
+import urllib.request
 from urllib.parse import unquote, urlsplit
 
 from src.security import DEFAULT_PORTS, DnsError, UnsafeUrlError, normalize_url, resolve_public
@@ -135,10 +136,17 @@ def _read_system_proxy() -> tuple[dict[str, UpstreamProxy], list[str], dict[str,
             # A malformed system setting must not prevent direct mode.
             routes = {}
     if not routes:
+        # ``urllib`` combines standard environment variables and the native
+        # Windows proxy settings, while remaining usable on Linux/macOS.  It
+        # does not execute PAC/WPAD scripts, which keeps routing predictable.
+        try:
+            standard_proxies = urllib.request.getproxies()
+        except Exception:
+            standard_proxies = {}
         environment_values = {
-            "http": os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy"),
-            "https": os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy"),
-            "*": os.environ.get("ALL_PROXY") or os.environ.get("all_proxy"),
+            "http": standard_proxies.get("http") or os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy"),
+            "https": standard_proxies.get("https") or os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy"),
+            "*": standard_proxies.get("all") or os.environ.get("ALL_PROXY") or os.environ.get("all_proxy"),
         }
         for scheme, value in environment_values.items():
             if not value:
@@ -151,7 +159,8 @@ def _read_system_proxy() -> tuple[dict[str, UpstreamProxy], list[str], dict[str,
                 routes[scheme] = proxy
         if routes:
             metadata["source"] = "proxy_environment"
-    environment_bypass = os.environ.get("NO_PROXY") or os.environ.get("no_proxy")
+    environment_bypass = (os.environ.get("NO_PROXY") or os.environ.get("no_proxy")
+                          or (standard_proxies.get("no") if "standard_proxies" in locals() else None))
     if environment_bypass:
         bypass.extend(environment_bypass.split(","))
     bypass = [item.strip() for item in bypass if item.strip()]

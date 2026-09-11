@@ -37,6 +37,7 @@ class AuditLogTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(records[0]["event"], "tool_call_started")
             self.assertEqual(records[0]["tool"], "scrape")
             self.assertEqual(records[0]["caller"]["name"], "Test Agent")
+            self.assertNotIn("parent_command", records[0]["caller"])
             self.assertEqual(records[0]["details"]["target_host"], "example.com")
             self.assertNotIn("URL-SECRET", json.dumps(records, ensure_ascii=False))
 

@@ -6,7 +6,7 @@ from io import StringIO
 import unittest
 from unittest.mock import patch
 
-from src.cli import _tool_parser, main
+from src.cli import _print_tool_result, _tool_parser, main
 
 
 class CliTests(unittest.TestCase):
@@ -33,9 +33,32 @@ class CliTests(unittest.TestCase):
             "https://example.com", "--auth-profile", "github",
         ])
         self.assertEqual(parsed.auth_profile, "github")
+        self.assertEqual(parsed.output_format, "auto")
         with patch("src.cli._run_tool_command", return_value=0) as run_tool:
             self.assertEqual(main(["login", "bilibili"]), 0)
         run_tool.assert_called_once_with(["login", "bilibili"])
+
+    def test_human_tool_output_is_concise(self):
+        output = StringIO()
+        result = {
+            "success": True, "title": "Example", "status_code": 200,
+            "final_url": "https://example.com", "markdown": "正文",
+            "summary": {"text": "摘要"}, "truncated": False,
+        }
+        with redirect_stdout(output):
+            _print_tool_result("scrape", result, "human")
+        text = output.getvalue()
+        self.assertIn("✅ 抓取完成", text)
+        self.assertIn("标题：Example", text)
+        self.assertIn("正文", text)
+        self.assertNotIn('"success": true', text)
+
+    def test_no_arguments_does_not_start_an_interactive_terminal_when_piped(self):
+        output = StringIO()
+        with redirect_stdout(output), patch("sys.stdin.isatty", return_value=False), \
+                patch("sys.stdout.isatty", return_value=False):
+            self.assertEqual(main([]), 0)
+        self.assertIn("scrapling-mcp terminal", output.getvalue())
 
 
 if __name__ == "__main__":

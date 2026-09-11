@@ -209,6 +209,23 @@ def _path_matches_entrypoint(value: Any) -> bool:
     return candidate == MAIN_ENTRYPOINT
 
 
+def _is_server_command(cmdline: list[Any]) -> bool:
+    """Recognise both ``main.py`` and the installed console-script form."""
+    if "--terminal" in cmdline or "--check" in cmdline:
+        return False
+    if any(_path_matches_entrypoint(arg) for arg in cmdline):
+        return True
+    names = set()
+    for value in cmdline:
+        if not isinstance(value, str):
+            continue
+        try:
+            names.add(Path(value.strip().strip('"')).stem.casefold())
+        except (OSError, TypeError, ValueError):
+            continue
+    return "--mcp" in cmdline and bool(names & {"scrapling-mcp", "smcp"})
+
+
 def _server_process_objects() -> list[Any]:
     """Find this project's MCP entrypoint processes, excluding this terminal."""
     processes: list[Any] = []
@@ -223,7 +240,7 @@ def _server_process_objects() -> list[Any]:
             if info.get("pid") == current_pid:
                 continue
             cmdline = info.get("cmdline") or []
-            if "--terminal" in cmdline or not any(_path_matches_entrypoint(arg) for arg in cmdline):
+            if not _is_server_command(cmdline):
                 continue
             processes.append(process)
     except Exception:
@@ -356,14 +373,35 @@ def restart_mcp() -> dict[str, Any]:
     )
 
     # Give a supervising MCP client a short opportunity to spawn the fresh
-    # stdio process before returning the human-readable result.
-    time.sleep(0.5)
+    # stdio process.  Report whether that actually happened instead of
+    # claiming that the restart succeeded merely because the old process died.
+    old_pids = set(process_by_pid)
+    new_pids: set[int] = set()
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        try:
+            new_pids = {
+                int(process.info.get("pid"))
+                for process in _server_process_objects()
+                if process.info.get("pid") not in old_pids
+            }
+        except (AttributeError, TypeError, ValueError):
+            new_pids = set()
+        if new_pids:
+            break
+        time.sleep(0.2)
     if remaining:
         message = f"已请求重启，但仍有 {remaining} 个 MCP 进程未退出，请检查权限或手动重连 MCP 客户端。"
         success = False
-    else:
-        message = "已停止旧的 MCP 服务进程。MCP 客户端应自动重新拉起；如果未恢复，请重新连接 MCP 客户端。"
+        reconnected = False
+    elif new_pids:
+        message = f"已停止旧进程，并检测到 MCP 客户端重新拉起服务（新进程 {', '.join(map(str, sorted(new_pids)))}）。"
         success = True
+        reconnected = True
+    else:
+        message = "旧 MCP 进程已停止，但暂未检测到客户端重新拉起；请在 Agent 客户端中重新连接 MCP。"
+        success = False
+        reconnected = False
     return {
         "success": success,
         "found": len(process_by_pid),
@@ -371,6 +409,8 @@ def restart_mcp() -> dict[str, Any]:
         "terminated": terminated,
         "remaining": remaining,
         "errors": errors,
+        "reconnected": reconnected,
+        "new_pids": sorted(new_pids),
         "message": message,
     }
 
@@ -473,6 +513,9 @@ def _print_status(data: dict[str, Any]) -> None:
     print(f"调用日志: {data['logs']['calls']}")
     print(_paint(f"依赖/浏览器检查: {'就绪' if diagnostics['ready'] else '未就绪'}",
                  "green" if diagnostics["ready"] else "red"))
+    configuration = diagnostics.get("configuration") or {}
+    if not configuration.get("ready", True):
+        print(_paint(f"运行配置: 错误：{configuration.get('error', '无效')}", "red"))
     missing = [name for name, version in diagnostics["dependencies"].items() if not version]
     missing += [name for name, item in diagnostics["browsers"].items() if not item.get("installed")]
     if missing:
@@ -561,12 +604,14 @@ def _help_data() -> list[dict[str, str]]:
     return [
         {"command": "status", "description": "查看程序运行状态、依赖、浏览器和进程信息"},
         {"command": "cookies", "description": "查看已有登录配置；只显示名称、域名和数量，不显示 Cookie 值"},
+        {"command": "profiles", "description": "cookies 的快捷别名，查看所有本机登录配置"},
         {"command": "tools", "description": "查看所有 MCP 工具当前是启用还是停用"},
         {"command": "guide", "description": "显示可复制给 AI Agent 的完整 MCP 使用说明"},
         {"command": "logs", "description": "查看日志文件位置和最近的运行/调用记录"},
         {"command": "logs calls", "description": "只查看最近是谁调用了什么工具"},
         {"command": "logs runtime", "description": "只查看最近的程序运行记录"},
         {"command": "restart", "description": "停止当前项目 MCP 进程，让 MCP 客户端自动重新拉起服务"},
+        {"command": "doctor", "description": "检查依赖、浏览器和环境变量配置"},
         {"command": "tool enable NAME", "description": "启用指定工具，例如：tool enable scrape"},
         {"command": "tool disable NAME", "description": "停用指定工具，例如：tool disable scrape_batch"},
         {"command": "help", "description": "显示这份命令说明"},
@@ -644,6 +689,20 @@ def _dispatch(command: list[str], *, json_output: bool = False) -> int:
     if name == "status" and len(command) == 1:
         data = status_data()
         _print_json(data) if json_output else _print_status(data)
+        return 0
+    if name == "doctor" and len(command) == 1:
+        data = check()
+        _print_json(data) if json_output else _print_status({
+            **status_data(), "diagnostics": data,
+        })
+        return 0 if data.get("ready") else 1
+    if name == "profiles" and len(command) == 1:
+        data = cookies_data()
+        if json_output:
+            _print_json(data)
+        else:
+            _print_cookie_group("=== 手动 Cookie profiles（值已隐藏）===", data["cookie_profiles"])
+            _print_cookie_group("=== 浏览器登录 profiles（值已隐藏）===", data["auth_profiles"])
         return 0
     if name == "cookies" and len(command) == 1:
         data = cookies_data()

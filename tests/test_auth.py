@@ -145,6 +145,7 @@ class AuthEngineTests(unittest.IsolatedAsyncioTestCase):
                 result = await start_login("github", timeout=10, auth_dir=directory)
                 self.assertEqual(result["status"], "waiting")
                 self.assertFalse(result["ready"])
+                self.assertIn("login_status", result["next_action"])
                 finished = await finish_login("github", directory)
             self.assertEqual(finished["status"], "ready")
         finally:
@@ -215,6 +216,7 @@ class AuthEngineTests(unittest.IsolatedAsyncioTestCase):
                     ["example.com"], timeout=10, auth_dir=directory,
                 )
                 self.assertEqual(result["status"], "waiting")
+                self.assertIn("login_custom_status", result["next_action"])
                 finished = await finish_login("example-account", directory)
             self.assertEqual(finished["status"], "ready")
             document = json.loads((directory / "example-account.state.json").read_text(encoding="utf-8"))

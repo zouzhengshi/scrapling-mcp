@@ -13,10 +13,11 @@ from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import BaseModel, Field
 
 from src.agent_guide import MCP_AGENT_INSTRUCTIONS
-from src.auth import (AuthProfileError, login_status as get_login_status,
+from src.auth import (AuthProfileError, get_site_preset,
+                       login_status as get_login_status,
                        start_custom_login, start_login)
 from src.audit_log import audit_tool, close_logging, configure_logging, runtime_event
-from src.config import ConfigError, is_tool_enabled
+from src.config import ConfigError, is_tool_enabled, runtime_options
 from src.egress import UpstreamProxyError, resolve_proxy_configuration, upstream_proxy_info
 from src.engine import ScraplingEngine
 from src.models import failure
@@ -77,6 +78,7 @@ class LoginOutput(BaseModel):
     status: str
     ready: bool
     message: str
+    next_action: str | None = None
     error_code: str | None = None
 
 
@@ -91,14 +93,11 @@ def _获取引擎() -> ScraplingEngine:
             resolve_proxy_configuration()
         except UpstreamProxyError as exc:
             raise ValueError(f"SCRAPLING_UPSTREAM_PROXY 配置无效：{exc}") from exc
+        options = runtime_options()
         _engine = ScraplingEngine(
-            max_concurrency=int(os.environ.get("SCRAPLING_MAX_CONCURRENCY", "3")),
-            max_queue=int(os.environ.get("SCRAPLING_MAX_QUEUE", "24")),
-            min_interval=float(os.environ.get("SCRAPLING_MIN_INTERVAL", "1")),
-            cache_ttl=float(os.environ.get("SCRAPLING_CACHE_TTL", "30")),
+            **options,
             cookie_file=os.environ.get("SCRAPLING_COOKIE_FILE"),
             auth_dir=os.environ.get("SCRAPLING_AUTH_DIR"),
-            allowed_ports=tuple(int(p.strip()) for p in os.environ.get("SCRAPLING_ALLOWED_PORTS", "80,443").split(",")),
         )
     return _engine
 
@@ -206,6 +205,7 @@ async def login_status(
     if blocked:
         return blocked
     try:
+        get_site_preset(site)
         data = await get_login_status(site, os.environ.get("SCRAPLING_AUTH_DIR"), finalize)
     except AuthProfileError as exc:
         data = {"success": False, "site": site, "auth_profile": None,
@@ -256,11 +256,14 @@ async def scrape(
     blocked = _scrape_guard("scrape", url)
     if blocked:
         return blocked
-    result = await _获取引擎().scrape(
-        url, mode, timeout, max_chars, css_selector=css_selector, wait_for=wait_for,
-        main_content=main_content, include_links=include_links,
-        cookie_profile=cookie_profile, auth_profile=auth_profile,
-    )
+    try:
+        result = await _获取引擎().scrape(
+            url, mode, timeout, max_chars, css_selector=css_selector, wait_for=wait_for,
+            main_content=main_content, include_links=include_links,
+            cookie_profile=cookie_profile, auth_profile=auth_profile,
+        )
+    except (ConfigError, UpstreamProxyError, ValueError) as exc:
+        result = failure(url, "config", "CONFIG_ERROR", str(exc))
     return _tool_result(result.to_dict(), not result.success)
 
 
@@ -295,7 +298,14 @@ async def scrape_batch(
             "failed": len(urls), "results": [], "error_code": "TOOL_DISABLED",
             "message": "MCP 工具 scrape_batch 已由本机管理终端停用",
         }, True)
-    engine = _获取引擎()
+    try:
+        engine = _获取引擎()
+    except (ConfigError, UpstreamProxyError, ValueError) as exc:
+        return _tool_result({
+            "success": False, "total": len(urls), "succeeded": 0,
+            "failed": len(urls), "results": [], "error_code": "CONFIG_ERROR",
+            "message": str(exc),
+        }, True)
     results = await asyncio.gather(*(engine.scrape(url, mode, timeout, max_chars,
                                                    cookie_profile=cookie_profile,
                                                    auth_profile=auth_profile) for url in urls))

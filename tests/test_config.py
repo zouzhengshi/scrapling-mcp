@@ -8,7 +8,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from src.config import ConfigError, TOOL_NAMES, is_tool_enabled, load_config, set_tool_enabled
+from src.config import (ConfigError, TOOL_NAMES, is_tool_enabled, load_config,
+                         runtime_options, set_tool_enabled)
 
 
 class ConfigTests(unittest.TestCase):
@@ -36,6 +37,23 @@ class ConfigTests(unittest.TestCase):
             with patch.dict(os.environ, {"SCRAPLING_CONFIG_FILE": str(path)}, clear=False):
                 with self.assertRaises(ConfigError):
                     load_config()
+
+    def test_runtime_options_reject_invalid_environment_before_startup(self):
+        with patch.dict(os.environ, {"SCRAPLING_MAX_CONCURRENCY": "99"}, clear=True):
+            with self.assertRaises(ConfigError):
+                runtime_options()
+
+    def test_runtime_options_normalises_ports_and_numbers(self):
+        with patch.dict(os.environ, {
+            "SCRAPLING_MAX_CONCURRENCY": "4",
+            "SCRAPLING_MAX_QUEUE": "10",
+            "SCRAPLING_MIN_INTERVAL": "0.5",
+            "SCRAPLING_CACHE_TTL": "60",
+            "SCRAPLING_ALLOWED_PORTS": "443, 443, 8443",
+        }, clear=True):
+            options = runtime_options()
+        self.assertEqual(options["max_concurrency"], 4)
+        self.assertEqual(options["allowed_ports"], (443, 8443))
 
 
 if __name__ == "__main__":

@@ -8,6 +8,17 @@ version = "1.2.0"
 description = "安全通用的 AI Agent 网页抓取 MCP 服务"
 readme = "README.md"
 requires-python = ">=3.11"
+dependencies = [
+    "crawl4ai==0.9.3",
+    "scrapling[fetchers]==0.4.9",
+    "html2text==2025.4.15",
+    "mcp==1.27.2",
+    "pydantic==2.13.4",
+    "lxml==6.1.1",
+    "cssselect==1.4.0",
+    "psutil==7.2.2",
+    "patchright==1.60.1",
+]
 
 [project.scripts]
 scrapling-mcp = "src.cli:main"

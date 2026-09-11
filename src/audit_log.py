@@ -141,8 +141,10 @@ def _parent_process() -> dict[str, Any]:
     try:
         import psutil
         process = psutil.Process(parent_pid)
+        # Do not record the parent command line.  MCP clients often put
+        # connection settings, tokens, or other secrets in argv; process
+        # name + PID are enough to identify the caller in the local log.
         result["name"] = _safe(process.name(), 120)
-        result["command"] = _safe(" ".join(process.cmdline()), 300)
     except Exception:
         result["name"] = None
     return result
@@ -157,7 +159,6 @@ def caller_context() -> dict[str, Any]:
         "source": "SCRAPLING_CALLER_NAME" if configured and configured.strip() else "parent_process",
         "pid": parent["pid"],
         "parent_name": parent.get("name"),
-        "parent_command": parent.get("command"),
     }
 
 

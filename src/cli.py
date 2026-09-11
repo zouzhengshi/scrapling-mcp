@@ -31,13 +31,15 @@ def _print_help() -> None:
     print("Scrapling MCP CLI")
     print()
     print("用法：")
-    print("  scrapling-mcp                         启动本地管理终端")
+    print("  scrapling-mcp terminal                启动本地管理终端（交互模式）")
     print("  scrapling-mcp status                  查看运行状态")
     print("  scrapling-mcp cookies                 查看脱敏登录配置")
+    print("  scrapling-mcp profiles                cookies 的快捷别名")
     print("  scrapling-mcp tools                   查看工具开关")
     print("  scrapling-mcp guide                   查看连接配置和 Agent 说明")
     print("  scrapling-mcp logs calls              查看工具调用日志")
     print("  scrapling-mcp restart                 重启 MCP 服务")
+    print("  scrapling-mcp doctor                  检查依赖、浏览器和配置")
     print("  scrapling-mcp scrape URL              通过 CLI 抓取一个网页")
     print("  scrapling-mcp scrape_batch URL...     通过 CLI 批量抓取网页")
     print("  scrapling-mcp login SITE              打开预设网站登录窗口并等待完成")
@@ -47,6 +49,8 @@ def _print_help() -> None:
     print("  scrapling-mcp --check                 检查依赖和浏览器")
     print("  scrapling-mcp --agent-guide           输出可复制给 Agent 的说明")
     print("  scrapling-mcp --version               查看版本")
+    print()
+    print("核心工具默认按终端自动选择人类可读输出；脚本请使用 --format json。")
     print()
     print("注意：底层 Scrapling 库已经占用 scrapling 命令，本项目使用 scrapling-mcp 避免冲突。")
 
@@ -78,6 +82,10 @@ def _tool_parser(command: str):
     import argparse
 
     parser = argparse.ArgumentParser(prog=f"scrapling-mcp {command}")
+    parser.add_argument(
+        "--format", dest="output_format", choices=("auto", "human", "json"),
+        default="auto", help="输出格式：auto（TTY 人类可读，否则 JSON）、human 或 json",
+    )
     if command == "scrape":
         parser.add_argument("url")
         parser.add_argument("--mode", choices=("auto", "fast", "stealth"), default="auto")
@@ -121,6 +129,63 @@ def _tool_parser(command: str):
 
 def _tool_error(message: str, error_code: str = "CLI_ERROR") -> dict[str, object]:
     return {"success": False, "error_code": error_code, "message": message}
+
+
+def _print_human_tool_result(command: str, result: dict) -> None:
+    """Render a concise CLI result without exposing the protocol envelope."""
+    if result.get("success") is False:
+        code = result.get("error_code") or "UNKNOWN_ERROR"
+        message = result.get("message") or result.get("error") or "操作失败"
+        print(f"❌ 失败 [{code}]：{message}")
+        return
+    if command == "scrape":
+        summary = result.get("summary") or {}
+        print("✅ 抓取完成")
+        print(f"标题：{result.get('title') or '（无标题）'}")
+        print(f"状态：HTTP {result.get('status_code') or '未知'} | 地址：{result.get('final_url') or result.get('url')}")
+        if summary:
+            print(f"摘要：{summary.get('text') or summary.get('description') or '（无摘要）'}")
+        if result.get("truncated"):
+            print("⚠️ 正文已截断，若需要更多内容请提高 max-chars。")
+        markdown = result.get("markdown") or ""
+        if markdown:
+            print("\n--- 正文 ---\n" + markdown)
+        return
+    if command == "scrape_batch":
+        print(f"{'✅' if result.get('success') else '⚠️'} {result.get('message', '批量抓取完成')}")
+        for index, item in enumerate(result.get("results") or [], start=1):
+            marker = "✅" if item.get("success") else "❌"
+            title = item.get("title") or item.get("url") or "未知地址"
+            suffix = "" if item.get("success") else f"：{item.get('error_code') or item.get('error') or '失败'}"
+            print(f"{marker} {index}. {title}{suffix}")
+        return
+    print("✅ 操作完成")
+    if result.get("site"):
+        print(f"网站：{result['site']}")
+    if result.get("auth_profile"):
+        print(f"登录配置：{result['auth_profile']}")
+    if result.get("status"):
+        print(f"状态：{result['status']}")
+    if result.get("ready") is not None:
+        print(f"已就绪：{'是' if result['ready'] else '否'}")
+    if result.get("message"):
+        print(result["message"])
+    if result.get("next_action"):
+        print(f"下一步：{result['next_action']}")
+
+
+def _print_tool_result(command: str, result: dict, output_format: str) -> None:
+    use_json = output_format == "json"
+    if output_format == "auto":
+        try:
+            use_json = not bool(sys.stdout.isatty())
+        except (AttributeError, OSError):
+            use_json = True
+    _utf8_stdout()
+    if use_json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        _print_human_tool_result(command, result)
 
 
 def _target_host(url: str) -> str | None:
@@ -283,16 +348,14 @@ def _run_tool_command(args: list[str]) -> int:
         pass
     try:
         result = asyncio.run(_run_tool_operation(command, parsed))
-        _utf8_stdout()
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        _print_tool_result(command, result, parsed.output_format)
         return 0 if result.get("success") is True else 1
     except (AuthProfileError, ValueError, OSError) as exc:
-        _utf8_stdout()
-        print(json.dumps(_tool_error(str(exc)), ensure_ascii=False, indent=2))
+        _print_tool_result(command, _tool_error(str(exc)), getattr(parsed, "output_format", "json"))
         return 1
     except Exception:
-        _utf8_stdout()
-        print(json.dumps(_tool_error("CLI 工具执行失败", "CLI_ERROR"), ensure_ascii=False, indent=2))
+        _print_tool_result(command, _tool_error("CLI 工具执行失败", "CLI_ERROR"),
+                           getattr(parsed, "output_format", "json"))
         return 1
     finally:
         runtime_event("cli_tool_stopped", tool=command, pid=os.getpid())
@@ -330,6 +393,23 @@ def main(argv: list[str] | None = None) -> int:
         "login_custom", "login_custom_status",
     }:
         return _run_tool_command(args)
+    if args and args[0].lower() in {"terminal", "interactive"}:
+        return _run_management_terminal(args[1:])
+    if args and args[0].lower() == "doctor":
+        return _run_check()
+    if args and args[0].lower() == "profiles":
+        return _run_management_terminal([*args[1:], "cookies"] if len(args) > 1 else ["cookies"])
+    # Preserve the convenient no-argument terminal for a real interactive
+    # console, but never block a pipe, CI job, or another program.
+    if not args:
+        try:
+            interactive = bool(sys.stdin.isatty() and sys.stdout.isatty())
+        except (AttributeError, OSError):
+            interactive = False
+        if interactive:
+            return _run_management_terminal([])
+        _print_help()
+        return 0
     return _run_management_terminal(args)
 
 
