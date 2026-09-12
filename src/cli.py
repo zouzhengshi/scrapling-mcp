@@ -15,7 +15,7 @@ from src.auth import (SITE_PRESETS, AuthProfileError,
 from src.config import ConfigError, is_tool_enabled
 from src.engine import ScraplingEngine
 from src.models import failure
-from src.terminal import APP_VERSION, run_terminal
+from src.terminal import APP_VERSION, _enable_windows_ansi, run_terminal
 from src.update_check import check_for_update, human_message
 
 
@@ -67,7 +67,9 @@ def _run_check() -> int:
 
 
 def _run_management_terminal(argv: list[str]) -> int:
-    _maybe_print_update_notice()
+    # Interactive startup shows the notice in the terminal's main stream;
+    # one-shot/status commands use stderr so JSON stdout stays machine-safe.
+    _maybe_print_update_notice(startup=not argv)
     try:
         log_directory = configure_logging()
         runtime_event("terminal_started", log_directory=str(log_directory), pid=os.getpid(),
@@ -89,11 +91,25 @@ def _utf8_stderr() -> None:
             pass
 
 
-def _maybe_print_update_notice() -> None:
+def _maybe_print_update_notice(*, startup: bool = False) -> None:
     message = human_message(check_for_update(APP_VERSION))
     if message:
-        _utf8_stderr()
-        print(message, file=sys.stderr)
+        stream = sys.stdout if startup else sys.stderr
+        if stream is sys.stderr:
+            _utf8_stderr()
+        try:
+            use_color = bool(stream.isatty()) and os.environ.get("NO_COLOR") is None
+        except (AttributeError, OSError):
+            use_color = False
+        if use_color and os.name == "nt":
+            use_color = _enable_windows_ansi()
+        if use_color:
+            # Bright yellow background keeps the notice visible without
+            # implying an error.
+            rendered = f"\033[1;30;103m🔔 版本更新提醒\033[0m {message}"
+        else:
+            rendered = f"🔔 【版本更新提醒】{message}"
+        print(rendered, file=stream)
 
 
 def _run_update_command(argv: list[str]) -> int:

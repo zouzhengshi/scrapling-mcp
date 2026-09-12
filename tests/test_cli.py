@@ -6,7 +6,8 @@ from io import StringIO
 import unittest
 from unittest.mock import patch
 
-from src.cli import _print_tool_result, _tool_parser, main
+from src.cli import (_maybe_print_update_notice, _print_tool_result,
+                     _tool_parser, main)
 
 
 class CliTests(unittest.TestCase):
@@ -77,6 +78,18 @@ class CliTests(unittest.TestCase):
         with patch("src.cli.check_for_update", return_value=result), redirect_stdout(output):
             self.assertEqual(main(["update"]), 0)
         self.assertIn("最新版本", output.getvalue())
+
+    def test_startup_update_notice_is_highlighted_or_readable(self):
+        output = StringIO()
+        result = {
+            "status": "update_available", "current_version": "1.2.0",
+            "latest_version": "1.3.0",
+            "release_url": "https://github.com/zouzhengshi/scrapling-mcp/releases/tag/v1.3.0",
+        }
+        with patch("src.cli.check_for_update", return_value=result), redirect_stdout(output):
+            _maybe_print_update_notice(startup=True)
+        self.assertIn("版本更新提醒", output.getvalue())
+        self.assertIn("1.3.0", output.getvalue())
 
 
 if __name__ == "__main__":

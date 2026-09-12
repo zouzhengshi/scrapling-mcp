@@ -154,7 +154,7 @@ scrapling-mcp --agent-guide
 ### 🔔 版本更新提示
 
 运行 `scrapling-mcp terminal`、`status` 或 `doctor` 时，程序会用不超过 3 秒的请求检查 GitHub 最新 Release；
-检查结果会缓存 24 小时，发现新版本时只显示提示和 Release 链接，不会自动下载、安装或修改文件。
+检查结果会缓存 24 小时，发现新版本时会在交互终端高亮显示提示和 Release 链接，不会自动下载、安装或修改文件。
 也可以手动检查：
 
 ```powershell
