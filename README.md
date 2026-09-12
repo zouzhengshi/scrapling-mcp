@@ -1,5 +1,11 @@
 # 🕷️ Scrapling MCP
 
+## 项目文档
+
+- [更新日志](https://github.com/zouzhengshi/scrapling-mcp/blob/main/CHANGELOG.md)
+- [安全说明](https://github.com/zouzhengshi/scrapling-mcp/blob/main/SECURITY.md)
+- [麻省理工学院许可](https://github.com/zouzhengshi/scrapling-mcp/blob/main/LICENSE)
+
 面向 AI Agent 的安全、通用网页抓取 MCP 服务。
 
 它把网页抓取、动态页面渲染和用户授权登录统一封装成 MCP 工具，
@@ -146,9 +152,3 @@ $env:SCRAPLING_UPSTREAM_PROXY="http://127.0.0.1:7890"
 - PDF 解析；
 - POST 页面和任意用户脚本；
 - 保证绕过验证码或反爬挑战。
-
-## 📄 项目文档
-
-- [更新日志](CHANGELOG.md)
-- [安全说明](SECURITY.md)
-- [MIT License](LICENSE)
