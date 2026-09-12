@@ -34,40 +34,108 @@
 | `login_custom` | 打开自定义网站的登录窗口 |
 | `login_custom_status` | 查询或保存自定义网站登录状态 |
 
-## 🚀 Windows 安装
+## 🚀 安装和部署
 
-需要 Python 3.11 或更高版本。
+需要 Python 3.11 或更高版本，支持 Windows、Linux 和 macOS。
 
-### 1. 下载项目
+### 🪟 Windows
+
+#### 1. 下载项目
 
 ```powershell
 git clone https://github.com/zouzhengshi/scrapling-mcp.git
 cd scrapling-mcp
 ```
 
-### 2. 创建环境并安装依赖
+#### 2. 创建环境并安装依赖
 
 ```powershell
 python -m venv scrapling_env
-.\scrapling_env\Scripts\python.exe -m pip install --upgrade pip
-.\scrapling_env\Scripts\python.exe -m pip install -e .
-.\scrapling_env\Scripts\python.exe -m playwright install chromium
-.\scrapling_env\Scripts\python.exe -m patchright install chromium
 .\scrapling_env\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -e .
+python -m playwright install chromium
+python -m patchright install chromium
 ```
 
-### 3. 检查安装
+#### 3. 检查安装
 
 ```powershell
 .\scrapling_env\Scripts\scrapling-mcp.exe --check
 ```
 
+激活虚拟环境后，也可以直接使用 `scrapling-mcp --check`。
+
+### 🐧 Linux
+
+#### 1. 下载项目并创建虚拟环境
+
+```bash
+git clone https://github.com/zouzhengshi/scrapling-mcp.git
+cd scrapling-mcp
+python3 -m venv scrapling_env
+source scrapling_env/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e .
+```
+
+#### 2. 安装浏览器运行环境
+
+```bash
+python -m playwright install chromium
+python -m patchright install chromium
+```
+
+在 Ubuntu/Debian 上如果提示缺少系统库，可以执行：
+
+```bash
+python -m playwright install --with-deps chromium
+```
+
+#### 3. 检查安装
+
+```bash
+scrapling-mcp --check
+```
+
+### 🍎 macOS
+
+#### 1. 下载项目并创建虚拟环境
+
+```bash
+git clone https://github.com/zouzhengshi/scrapling-mcp.git
+cd scrapling-mcp
+python3 -m venv scrapling_env
+source scrapling_env/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e .
+```
+
+#### 2. 安装浏览器运行环境
+
+```bash
+python -m playwright install chromium
+python -m patchright install chromium
+```
+
+#### 3. 检查安装
+
+```bash
+scrapling-mcp --check
+```
+
 ## 🔌 连接 AI Agent
 
-运行下面的命令生成当前电脑可直接使用的连接配置：
+先激活虚拟环境，然后运行下面的命令生成当前电脑可直接使用的连接配置：
 
-```powershell
-.\scrapling_env\Scripts\scrapling-mcp.exe guide
+```bash
+# Linux/macOS
+source scrapling_env/bin/activate
+
+# Windows PowerShell
+.\scrapling_env\Scripts\Activate.ps1
+
+scrapling-mcp guide
 ```
 
 把输出的 JSON 添加到支持 stdio MCP 的 Agent 客户端中。连接命令必须使用你电脑上的实际路径，
@@ -81,13 +149,13 @@ MCP 服务通常由 Agent 客户端自动启动，不要把管理终端当作 MC
 
 以 Bilibili 为例：
 
-```powershell
+```console
 scrapling-mcp login bilibili
 ```
 
 在弹出的浏览器中完成登录并关闭窗口，然后使用：
 
-```powershell
+```console
 scrapling-mcp login_status bilibili --finalize
 scrapling-mcp scrape "https://www.bilibili.com/" --auth-profile bilibili
 ```
@@ -96,7 +164,7 @@ YouTube、GitHub、知乎、微博和小红书的用法相同，把网站名称�
 
 ### 没有预设的网站
 
-```powershell
+```console
 scrapling-mcp login_custom my-site "https://example.com/login" --allowed-domain example.com
 scrapling-mcp login_custom_status my-site --finalize
 scrapling-mcp scrape "https://example.com/account" --auth-profile my-site
@@ -107,7 +175,7 @@ scrapling-mcp scrape "https://example.com/account" --auth-profile my-site
 
 ## 🖥️ CLI 命令
 
-```powershell
+```console
 scrapling-mcp terminal    # 启动管理终端
 scrapling-mcp status      # 查看运行状态
 scrapling-mcp cookies     # 查看脱敏登录配置
@@ -119,7 +187,7 @@ scrapling-mcp doctor      # 检查依赖和配置
 
 Agent 也可以直接通过 CLI 使用全部核心功能：
 
-```powershell
+```console
 scrapling-mcp scrape "https://example.com"
 scrapling-mcp scrape_batch "https://example.com" "https://www.python.org"
 scrapling-mcp login bilibili
@@ -131,7 +199,13 @@ scrapling-mcp login_status bilibili --finalize
 如果目标网站需要代理或 VPN，可以配置本机代理软件的 HTTP 或 SOCKS5 端口：
 
 ```powershell
+# Windows PowerShell
 $env:SCRAPLING_UPSTREAM_PROXY="http://127.0.0.1:7890"
+```
+
+```bash
+# Linux/macOS
+export SCRAPLING_UPSTREAM_PROXY="http://127.0.0.1:7890"
 ```
 
 ## 🛡️ 安全边界
