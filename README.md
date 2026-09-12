@@ -1,10 +1,10 @@
 # 🕷️ Scrapling MCP
 
-## 项目文档
+## 📚 项目文档
 
-- [更新日志](https://github.com/zouzhengshi/scrapling-mcp/blob/main/CHANGELOG.md)
-- [安全说明](https://github.com/zouzhengshi/scrapling-mcp/blob/main/SECURITY.md)
-- [麻省理工学院许可](https://github.com/zouzhengshi/scrapling-mcp/blob/main/LICENSE)
+| [📝 更新日志](https://github.com/zouzhengshi/scrapling-mcp/blob/main/CHANGELOG.md) | [🔐 安全说明](https://github.com/zouzhengshi/scrapling-mcp/blob/main/SECURITY.md) | [📄 MIT License](https://github.com/zouzhengshi/scrapling-mcp/blob/main/LICENSE) |
+| :---: | :---: | :---: |
+| 版本变化与发布记录 | 安全边界与漏洞报告 | 开源使用条款 |
 
 面向 AI Agent 的安全、通用网页抓取 MCP 服务。
 
