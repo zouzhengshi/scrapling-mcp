@@ -11,6 +11,7 @@ cookies.json
 logs/
 *.log
 *.jsonl
+update-check.json
 *.egg-info/
 auth_profiles/
 auth-profiles/

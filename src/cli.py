@@ -16,6 +16,7 @@ from src.config import ConfigError, is_tool_enabled
 from src.engine import ScraplingEngine
 from src.models import failure
 from src.terminal import APP_VERSION, run_terminal
+from src.update_check import check_for_update, human_message
 
 
 def _utf8_stdout() -> None:
@@ -40,6 +41,7 @@ def _print_help() -> None:
     print("  scrapling-mcp logs calls              查看工具调用日志")
     print("  scrapling-mcp restart                 重启 MCP 服务")
     print("  scrapling-mcp doctor                  检查依赖、浏览器和配置")
+    print("  scrapling-mcp update                  检查 GitHub 上是否有新版本")
     print("  scrapling-mcp scrape URL              通过 CLI 抓取一个网页")
     print("  scrapling-mcp scrape_batch URL...     通过 CLI 批量抓取网页")
     print("  scrapling-mcp login SITE              打开预设网站登录窗口并等待完成")
@@ -65,6 +67,7 @@ def _run_check() -> int:
 
 
 def _run_management_terminal(argv: list[str]) -> int:
+    _maybe_print_update_notice()
     try:
         log_directory = configure_logging()
         runtime_event("terminal_started", log_directory=str(log_directory), pid=os.getpid(),
@@ -76,6 +79,46 @@ def _run_management_terminal(argv: list[str]) -> int:
     finally:
         runtime_event("terminal_stopped", pid=os.getpid(), cli="scrapling-mcp")
         close_logging()
+
+
+def _utf8_stderr() -> None:
+    if hasattr(sys.stderr, "reconfigure"):
+        try:
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError):
+            pass
+
+
+def _maybe_print_update_notice() -> None:
+    message = human_message(check_for_update(APP_VERSION))
+    if message:
+        _utf8_stderr()
+        print(message, file=sys.stderr)
+
+
+def _run_update_command(argv: list[str]) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="scrapling-mcp update")
+    parser.add_argument("--force", action="store_true", help="忽略本地缓存，立即检查")
+    parser.add_argument("--format", choices=("human", "json"), default="human")
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        return int(exc.code)
+    result = check_for_update(APP_VERSION, force=args.force)
+    _utf8_stdout()
+    if args.format == "json":
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    elif result["status"] == "update_available":
+        print(human_message(result))
+    elif result["status"] == "up_to_date":
+        print(f"✅ 当前已是最新版本 Scrapling MCP {result['current_version']}。")
+    elif result["status"] == "disabled":
+        print("ℹ️ 更新检查已关闭（SCRAPLING_UPDATE_CHECK=off）。")
+    else:
+        print("⚠️ 暂时无法检查更新；不影响当前程序使用。")
+    return 0
 
 
 def _tool_parser(command: str):
@@ -388,6 +431,8 @@ def main(argv: list[str] | None = None) -> int:
         sys.argv = [sys.argv[0], *args[1:]]
         mcp_main()
         return 0
+    if args and args[0].lower() == "update":
+        return _run_update_command(args[1:])
     if args and args[0].replace("-", "_") in {
         "scrape", "scrape_batch", "login", "login_status",
         "login_custom", "login_custom_status",
@@ -396,6 +441,7 @@ def main(argv: list[str] | None = None) -> int:
     if args and args[0].lower() in {"terminal", "interactive"}:
         return _run_management_terminal(args[1:])
     if args and args[0].lower() == "doctor":
+        _maybe_print_update_notice()
         return _run_check()
     if args and args[0].lower() == "profiles":
         return _run_management_terminal([*args[1:], "cookies"] if len(args) > 1 else ["cookies"])

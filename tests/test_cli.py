@@ -60,6 +60,24 @@ class CliTests(unittest.TestCase):
             self.assertEqual(main([]), 0)
         self.assertIn("scrapling-mcp terminal", output.getvalue())
 
+    def test_update_command_reports_available_release(self):
+        output = StringIO()
+        result = {
+            "status": "update_available", "current_version": "1.2.0",
+            "latest_version": "1.2.1",
+            "release_url": "https://github.com/zouzhengshi/scrapling-mcp/releases/tag/v1.2.1",
+        }
+        with patch("src.cli.check_for_update", return_value=result), redirect_stdout(output):
+            self.assertEqual(main(["update"]), 0)
+        self.assertIn("1.2.1", output.getvalue())
+
+    def test_update_command_reports_current_release(self):
+        output = StringIO()
+        result = {"status": "up_to_date", "current_version": "1.2.0"}
+        with patch("src.cli.check_for_update", return_value=result), redirect_stdout(output):
+            self.assertEqual(main(["update"]), 0)
+        self.assertIn("最新版本", output.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

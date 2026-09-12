@@ -4,6 +4,13 @@
 
 版本遵循语义化版本号；日期使用 `YYYY-MM-DD`。
 
+## [Unreleased]
+
+### 🔔 新增
+
+- CLI 会定期检查 GitHub 最新 Release；发现新版本时只提示，不自动下载或安装。
+- 支持 `scrapling-mcp update`、`--force` 和 `SCRAPLING_UPDATE_CHECK=off`。
+
 ## [1.2.0] - 2026-09-11
 
 ### ✨ 新增
@@ -42,4 +49,3 @@
 - `example.com` 公网冒烟抓取：HTTP 200，Crawl4AI 成功返回正文。
 - Bilibili 已保存登录态：可读取登录状态。
 - YouTube 和自定义网站：自动化流程已覆盖；实际第三方登录仍受用户交互、代理和站点风控影响。
-

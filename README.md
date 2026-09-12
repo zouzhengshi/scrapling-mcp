@@ -140,6 +140,7 @@ scrapling-mcp status
 scrapling-mcp guide
 scrapling-mcp restart
 scrapling-mcp doctor
+scrapling-mcp update
 scrapling-mcp --check
 scrapling-mcp --agent-guide
 ```
@@ -149,6 +150,20 @@ scrapling-mcp --agent-guide
 所以项目放在其他磁盘或目录也不需要修改脚本；也可以用 `SCRAPLING_PYTHON` 指定解释器。
 `scrapling-mcp --mcp` 可以手动启动 stdio 服务，但通常应让 MCP 客户端按配置自动启动。
 `scrapling-mcp` 在真正的交互终端中仍会自动进入管理终端；在脚本、管道或 CI 中只显示帮助，不会阻塞等待输入。
+
+### 🔔 版本更新提示
+
+运行 `scrapling-mcp terminal`、`status` 或 `doctor` 时，程序会用不超过 3 秒的请求检查 GitHub 最新 Release；
+检查结果会缓存 24 小时，发现新版本时只显示提示和 Release 链接，不会自动下载、安装或修改文件。
+也可以手动检查：
+
+```powershell
+scrapling-mcp update
+scrapling-mcp update --force
+```
+
+如果不希望访问 GitHub，可设置 `SCRAPLING_UPDATE_CHECK=off` 关闭检查；也可以用
+`SCRAPLING_UPDATE_CACHE_TTL`（300–604800 秒）调整缓存时间。网络不可用时会静默跳过，不影响抓取和登录。
 
 注意：依赖库本身已经提供了 `scrapling` 命令（用于 Scrapling 库的其他功能），
 因此本项目 CLI 使用 `scrapling-mcp`，避免覆盖或混淆已有命令。
