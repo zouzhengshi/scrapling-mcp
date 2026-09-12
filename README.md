@@ -128,8 +128,6 @@ scrapling-mcp login_status bilibili --finalize
 $env:SCRAPLING_UPSTREAM_PROXY="http://127.0.0.1:7890"
 ```
 
-也可以使用系统代理自动模式。代理凭据不要写入仓库或发送给 Agent。
-
 ## 🛡️ 安全边界
 
 - 默认只允许访问公网 HTTP/HTTPS 地址，阻止回环、内网和云元数据地址。
